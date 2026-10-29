@@ -183,6 +183,10 @@ async def put_async(
     synchronous `put` allows for the `file` parameter, this **also supports an async
     iterator or iterable** of buffers.
 
+    Local `Path` inputs are opened asynchronously. Errors opening the file are
+    raised when awaiting this operation. Keep the source file available until
+    the upload finishes.
+
     This means, for example, you can pass the result of `get_async` directly to
     `put_async`, and the request will be streamed through Python during the put
     operation:
