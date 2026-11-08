@@ -105,6 +105,7 @@ def put(
     mode: PutMode | None = None,
     use_multipart: bool | None = None,
     chunk_size: int = 5 * 1024 * 1024,
+    multipart_threshold: int | None = None,
     max_concurrency: int = 12,
 ) -> PutResult:
     """Save the provided bytes to the specified location.
@@ -152,8 +153,9 @@ def put(
             If this provided and is not `"overwrite"`, a non-multipart upload will be performed. Defaults to `"overwrite"`.
         attributes: Provide a set of `Attributes`. Defaults to `None`.
         tags: Provide tags for this object. Defaults to `None`.
-        use_multipart: Whether to use a multipart upload under the hood. Defaults using a multipart upload if the length of the file is greater than `chunk_size`. When `use_multipart` is `False`, the entire input will be materialized in memory as part of the upload.
+        use_multipart: Whether to use a multipart upload under the hood. Defaults using a multipart upload if the length of the file is greater than `multipart_threshold`. When `use_multipart` is `False`, the entire input will be materialized in memory as part of the upload.
         chunk_size: The size of chunks to use within each part of the multipart upload. Defaults to 5 MB.
+        multipart_threshold: The input size above which to use multipart uploads. Defaults to `chunk_size`.
         max_concurrency: The maximum number of chunks to upload concurrently. Defaults to 12.
 
     """
@@ -175,6 +177,7 @@ async def put_async(
     mode: PutMode | None = None,
     use_multipart: bool | None = None,
     chunk_size: int = 5 * 1024 * 1024,
+    multipart_threshold: int | None = None,
     max_concurrency: int = 12,
 ) -> PutResult:
     """Call `put` asynchronously.

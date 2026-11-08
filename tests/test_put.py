@@ -124,6 +124,37 @@ async def test_path_put_uses_multipart_above_default_chunk_size(
         assert e_tag.strip('"').endswith("-2") is is_multipart
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chunk_size", "multipart_threshold", "is_multipart"),
+    [
+        (8 * 1024 * 1024, 5 * 1024 * 1024, True),
+        (5 * 1024 * 1024, 7 * 1024 * 1024, False),
+    ],
+)
+async def test_put_async_path_multipart_threshold_is_independent_of_part_size(
+    *,
+    minio_store: S3Store,
+    tmp_path: Path,
+    chunk_size: int,
+    multipart_threshold: int,
+    is_multipart: bool,
+):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"x" * (6 * 1024 * 1024))
+
+    result = await minio_store.put_async(
+        "threshold-independent.bin",
+        source,
+        chunk_size=chunk_size,
+        multipart_threshold=multipart_threshold,
+    )
+
+    e_tag = result["e_tag"]
+    assert e_tag is not None
+    assert e_tag.strip('"').endswith("-1") is is_multipart
+
+
 def _start_delayed_fifo_writer(path: Path, delay: float) -> subprocess.Popen[bytes]:
     writer_script = """
 import os

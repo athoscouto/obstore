@@ -322,7 +322,7 @@ impl<'py> IntoPyObject<'py> for PyPutResult {
 }
 
 #[pyfunction]
-#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), max_concurrency=12))]
+#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put(
     py: Python,
@@ -334,6 +334,7 @@ pub(crate) fn put(
     mode: Option<PyPutMode>,
     use_multipart: Option<bool>,
     chunk_size: NonZeroUsize,
+    multipart_threshold: Option<NonZeroUsize>,
     max_concurrency: usize,
 ) -> PyObjectStoreResult<PyPutResult> {
     if matches!(file, PutInput::AsyncPush(_)) {
@@ -344,10 +345,11 @@ pub(crate) fn put(
 
     let mut file = py.detach(|| file.open_path_sync())?;
 
+    let multipart_threshold = multipart_threshold.unwrap_or(chunk_size);
     let mut use_multipart = if let Some(use_multipart) = use_multipart {
         use_multipart
     } else {
-        file.use_multipart(chunk_size)?
+        file.use_multipart(multipart_threshold)?
     };
 
     // If mode is provided and not Overwrite, force a non-multipart put
@@ -383,7 +385,7 @@ pub(crate) fn put(
 }
 
 #[pyfunction]
-#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), max_concurrency=12))]
+#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put_async(
     py: Python,
@@ -395,8 +397,10 @@ pub(crate) fn put_async(
     mode: Option<PyPutMode>,
     use_multipart: Option<bool>,
     chunk_size: NonZeroUsize,
+    multipart_threshold: Option<NonZeroUsize>,
     max_concurrency: usize,
 ) -> PyResult<Bound<PyAny>> {
+    let multipart_threshold = multipart_threshold.unwrap_or(chunk_size);
     // Path input is the one source whose mode inference must be deferred until it is opened.
     // Preserve the existing call-time preflight behavior for all other input types.
     let use_multipart = if matches!(file, PutInput::Path(_)) {
@@ -404,7 +408,7 @@ pub(crate) fn put_async(
     } else {
         Some(match use_multipart {
             Some(use_multipart) => use_multipart,
-            None => file.use_multipart(chunk_size)?,
+            None => file.use_multipart(multipart_threshold)?,
         })
     };
 
@@ -413,7 +417,7 @@ pub(crate) fn put_async(
             PutInput::Path(path) => {
                 let infer_multipart = use_multipart.is_none();
                 let (file, inferred_multipart) =
-                    open_path_async(path, chunk_size, infer_multipart).await?;
+                    open_path_async(path, multipart_threshold, infer_multipart).await?;
                 let use_multipart = use_multipart.or(inferred_multipart).unwrap_or(false);
                 (file, use_multipart)
             }
@@ -469,7 +473,7 @@ impl PutInput {
 
 async fn open_path_async(
     path: PathBuf,
-    chunk_size: NonZeroUsize,
+    multipart_threshold: NonZeroUsize,
     infer_multipart: bool,
 ) -> PyObjectStoreResult<(PutInput, Option<bool>)> {
     let error_path = path.clone();
@@ -479,7 +483,7 @@ async fn open_path_async(
             let origin_pos = file.stream_position()?;
             let size = file.seek(SeekFrom::End(0))?;
             file.seek(SeekFrom::Start(origin_pos))?;
-            Some(size > chunk_size.get() as u64)
+            Some(size > multipart_threshold.get() as u64)
         } else {
             None
         };
