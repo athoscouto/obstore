@@ -38,6 +38,7 @@ pyo3-bytes = { path = "../pyo3-bytes" }
 pyo3-file = { workspace = true }
 pyo3-object_store = { path = "../pyo3-object_store" }
 tokio = { workspace = true, features = [
+    "fs",
     "macros",
     "rt",
     "rt-multi-thread",

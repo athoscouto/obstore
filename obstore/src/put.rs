@@ -21,6 +21,7 @@ use pyo3_async_runtimes::tokio::get_runtime;
 use pyo3_bytes::PyBytes;
 use pyo3_file::PyFileLikeObject;
 use pyo3_object_store::{PyObjectStore, PyObjectStoreError, PyObjectStoreResult, PyPath};
+use tokio::io::AsyncReadExt;
 
 use crate::attributes::PyAttributes;
 use crate::tags::PyTagSet;
@@ -203,6 +204,9 @@ pub(crate) enum PutInput {
     /// A path to a file that will be opened asynchronously
     Path(PathBuf),
 
+    /// A native file opened for asynchronous reads by `put_async`.
+    AsyncFile(tokio::fs::File),
+
     /// Input that we can pull from
     Pull(PullSource),
 
@@ -218,6 +222,7 @@ impl PutInput {
     fn use_multipart(&mut self, chunk_size: NonZeroUsize) -> PyObjectStoreResult<bool> {
         match self {
             Self::Path(_) => unreachable!("path input must be opened before use"),
+            Self::AsyncFile(_) => unreachable!("async files do not need multipart inference"),
             Self::Buffer(buffer) => Ok(buffer.len() > chunk_size.get()),
             Self::Pull(pull_source) => pull_source.use_multipart(chunk_size),
             // We always use multipart uploads for push-based sources because we have no way of
@@ -229,6 +234,11 @@ impl PutInput {
     async fn read_all(&mut self) -> PyObjectStoreResult<PutPayload> {
         match self {
             Self::Path(_) => unreachable!("path input must be opened before use"),
+            Self::AsyncFile(file) => {
+                let mut buf = Vec::new();
+                file.read_to_end(&mut buf).await?;
+                Ok(Bytes::from(buf).into())
+            }
             Self::Buffer(buffer) => Ok(buffer.clone().into()),
             Self::Pull(pull_source) => {
                 let mut buf = Vec::new();
@@ -474,7 +484,7 @@ async fn open_path_async(
     let (file, inferred_multipart) =
         opened.map_err(|error| PyObjectStoreError::PyErr(PyErr::from(error)))?;
     Ok((
-        PutInput::Pull(PullSource::File(BufReader::new(file))),
+        PutInput::AsyncFile(tokio::fs::File::from_std(file)),
         inferred_multipart,
     ))
 }
@@ -562,6 +572,23 @@ async fn write_multipart(
                 writer.write(&scratch_buffer[0..read_size]);
             }
         }
+        PutInput::AsyncFile(mut file) => loop {
+            writer.wait_for_capacity(max_concurrency).await?;
+            let mut part = vec![0; chunk_size.get()];
+            let mut part_len = 0;
+            while part_len < part.len() {
+                let read_size = file.read(&mut part[part_len..]).await?;
+                if read_size == 0 {
+                    break;
+                }
+                part_len += read_size;
+            }
+            if part_len == 0 {
+                break;
+            }
+            part.truncate(part_len);
+            writer.put(Bytes::from(part));
+        },
         PutInput::SyncPush(push_reader) => {
             for buf in push_reader {
                 writer.wait_for_capacity(max_concurrency).await?;

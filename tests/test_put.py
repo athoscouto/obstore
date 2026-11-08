@@ -146,6 +146,28 @@ finally:
     )
 
 
+def _start_delayed_fifo_data_writer(path: Path, delay: float) -> subprocess.Popen[bytes]:
+    writer_script = """
+import os
+import sys
+import time
+
+fd = os.open(sys.argv[1], os.O_WRONLY)
+try:
+    time.sleep(float(sys.argv[2]))
+    os.write(fd, b"fifo payload")
+except BrokenPipeError:
+    pass
+finally:
+    os.close(fd)
+"""
+    return subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", writer_script, str(path), str(delay)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _has_open_file_descriptor_for(path: Path) -> bool:
     path_stat = path.stat()
     for descriptor in Path("/dev/fd").iterdir():
@@ -208,6 +230,78 @@ async def test_put_path_open_does_not_block_event_loop(tmp_path: Path, api: str)
         heartbeat_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await heartbeat_task
+        await asyncio.to_thread(_wait_for_fifo_writer, writer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires named pipes")
+@pytest.mark.parametrize("use_multipart", [False, True])
+async def test_put_async_path_read_does_not_block_event_loop(
+    tmp_path: Path,
+    use_multipart: bool,
+):
+    fifo = tmp_path / "source.fifo"
+    os.mkfifo(fifo)
+    writer = _start_delayed_fifo_data_writer(fifo, 0.25)
+    store = MemoryStore()
+    heartbeats = 0
+
+    async def heartbeat() -> None:
+        nonlocal heartbeats
+        while True:
+            heartbeats += 1
+            await asyncio.sleep(0.005)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    try:
+        await asyncio.sleep(0.02)
+        initial_heartbeats = heartbeats
+        await obstore.put_async(
+            store,
+            "fifo.txt",
+            fifo,
+            use_multipart=use_multipart,
+            chunk_size=4,
+        )
+
+        assert heartbeats - initial_heartbeats >= 10
+        assert store.get("fifo.txt").bytes() == b"fifo payload"
+        assert await asyncio.to_thread(_wait_for_fifo_writer, writer) == 0
+    finally:
+        heartbeat_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await heartbeat_task
+        await asyncio.to_thread(_wait_for_fifo_writer, writer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires named pipes")
+async def test_put_async_cancelled_while_reading_path_closes_file(tmp_path: Path):
+    fifo = tmp_path / "source.fifo"
+    os.mkfifo(fifo)
+    writer = _start_delayed_fifo_data_writer(fifo, 0.25)
+    store = MemoryStore()
+
+    async def put_fifo() -> None:
+        await obstore.put_async(store, "fifo.txt", fifo, use_multipart=False)
+
+    put_task = asyncio.create_task(put_fifo())
+    try:
+        await asyncio.sleep(0.05)
+        put_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await put_task
+
+        assert await asyncio.to_thread(_wait_for_fifo_writer, writer) == 0
+        for _ in range(100):
+            if not await asyncio.to_thread(_has_open_file_descriptor_for, fifo):
+                break
+            await asyncio.sleep(0.01)
+        assert not await asyncio.to_thread(_has_open_file_descriptor_for, fifo)
+        assert store.list().collect() == []
+    finally:
+        if not put_task.done():
+            put_task.cancel()
         await asyncio.to_thread(_wait_for_fifo_writer, writer)
 
 
