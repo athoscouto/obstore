@@ -12,7 +12,9 @@ use object_store::{
     ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, UpdateVersion,
     WriteMultipart,
 };
-use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyStopIteration, PyValueError};
+use pyo3::exceptions::{
+    PyOSError, PyRuntimeError, PyStopAsyncIteration, PyStopIteration, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::PyDict;
@@ -205,7 +207,7 @@ pub(crate) enum PutInput {
     Path(PathBuf),
 
     /// A native file opened for asynchronous reads by `put_async`.
-    AsyncFile(tokio::fs::File),
+    AsyncFile(AsyncFile),
 
     /// Input that we can pull from
     Pull(PullSource),
@@ -215,6 +217,11 @@ pub(crate) enum PutInput {
 
     /// Input that gives us chunks of unknown size, asynchronously
     AsyncPush(AsyncPushSource),
+}
+
+pub(crate) struct AsyncFile {
+    file: tokio::fs::File,
+    path: PathBuf,
 }
 
 impl PutInput {
@@ -236,7 +243,10 @@ impl PutInput {
             Self::Path(_) => unreachable!("path input must be opened before use"),
             Self::AsyncFile(file) => {
                 let mut buf = Vec::new();
-                file.read_to_end(&mut buf).await?;
+                file.file
+                    .read_to_end(&mut buf)
+                    .await
+                    .map_err(|error| path_io_error(&file.path, error))?;
                 Ok(Bytes::from(buf).into())
             }
             Self::Buffer(buffer) => Ok(buffer.clone().into()),
@@ -462,6 +472,7 @@ async fn open_path_async(
     chunk_size: NonZeroUsize,
     infer_multipart: bool,
 ) -> PyObjectStoreResult<(PutInput, Option<bool>)> {
+    let error_path = path.clone();
     let opened = tokio::task::spawn_blocking(move || {
         let mut file = File::open(path)?;
         let inferred_multipart = if infer_multipart {
@@ -481,12 +492,26 @@ async fn open_path_async(
         )))
     })?;
 
-    let (file, inferred_multipart) =
-        opened.map_err(|error| PyObjectStoreError::PyErr(PyErr::from(error)))?;
+    let (file, inferred_multipart) = opened.map_err(|error| path_io_error(&error_path, error))?;
     Ok((
-        PutInput::AsyncFile(tokio::fs::File::from_std(file)),
+        PutInput::AsyncFile(AsyncFile {
+            file: tokio::fs::File::from_std(file),
+            path: error_path,
+        }),
         inferred_multipart,
     ))
+}
+
+fn path_io_error(path: &std::path::Path, error: std::io::Error) -> PyObjectStoreError {
+    let error = match error.raw_os_error() {
+        Some(errno) => PyOSError::new_err((
+            errno,
+            error.to_string(),
+            path.to_string_lossy().into_owned(),
+        )),
+        None => PyOSError::new_err((error.to_string(),)),
+    };
+    PyObjectStoreError::PyErr(error)
 }
 
 async fn put_inner(
@@ -577,7 +602,11 @@ async fn write_multipart(
             let mut part = vec![0; chunk_size.get()];
             let mut part_len = 0;
             while part_len < part.len() {
-                let read_size = file.read(&mut part[part_len..]).await?;
+                let read_size = file
+                    .file
+                    .read(&mut part[part_len..])
+                    .await
+                    .map_err(|error| path_io_error(&file.path, error))?;
                 if read_size == 0 {
                     break;
                 }

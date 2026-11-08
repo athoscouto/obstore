@@ -59,8 +59,9 @@ async def test_put_async_missing_path_raises_when_awaited(tmp_path: Path):
 
     pending_put = obstore.put_async(store, "missing.txt", missing, use_multipart=False)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError) as exc_info:
         await pending_put
+    assert exc_info.value.filename == str(missing)
 
 
 @pytest.mark.asyncio
