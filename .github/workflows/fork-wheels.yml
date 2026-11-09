@@ -1,0 +1,51 @@
+name: Fork wheels
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    if: github.repository == 'athoscouto/obstore'
+    name: Wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64
+            manylinux: "2_28"
+          - runner: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: "2_28"
+          - runner: macos-15
+            target: aarch64
+            manylinux: "off"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: |
+            3.11
+            3.14
+      - name: Build release wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: "1.16.0"
+          rust-toolchain: "1.98.1"
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --locked --features abi3-py311 -i python3.11 --manifest-path obstore/Cargo.toml --out dist
+      - name: Install and verify on Python 3.14
+        run: |
+          python -m venv /tmp/wheel-test
+          /tmp/wheel-test/bin/python -m pip install dist/*.whl
+          /tmp/wheel-test/bin/python .github/scripts/verify_fork_wheel.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fork-wheel-${{ matrix.runner }}
+          path: dist/*.whl
+          if-no-files-found: error
