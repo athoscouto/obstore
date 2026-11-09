@@ -488,6 +488,7 @@ class ObjectStoreMethods:
         mode: PutMode | None = None,
         use_multipart: bool | None = None,
         chunk_size: int = 5 * 1024 * 1024,
+        multipart_threshold: int | None = None,
         max_concurrency: int = 12,
     ) -> PutResult:
         """Save the provided bytes to the specified location.
@@ -503,6 +504,7 @@ class ObjectStoreMethods:
             mode=mode,
             use_multipart=use_multipart,
             chunk_size=chunk_size,
+            multipart_threshold=multipart_threshold,
             max_concurrency=max_concurrency,
         )
 
@@ -523,6 +525,7 @@ class ObjectStoreMethods:
         mode: PutMode | None = None,
         use_multipart: bool | None = None,
         chunk_size: int = 5 * 1024 * 1024,
+        multipart_threshold: int | None = None,
         max_concurrency: int = 12,
     ) -> PutResult:
         """Call `put` asynchronously.
@@ -538,6 +541,7 @@ class ObjectStoreMethods:
             mode=mode,
             use_multipart=use_multipart,
             chunk_size=chunk_size,
+            multipart_threshold=multipart_threshold,
             max_concurrency=max_concurrency,
         )
 

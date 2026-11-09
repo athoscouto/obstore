@@ -12,7 +12,9 @@ use object_store::{
     ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult, UpdateVersion,
     WriteMultipart,
 };
-use pyo3::exceptions::{PyStopAsyncIteration, PyStopIteration, PyValueError};
+use pyo3::exceptions::{
+    PyOSError, PyRuntimeError, PyStopAsyncIteration, PyStopIteration, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::PyDict;
@@ -20,7 +22,8 @@ use pyo3::{intern, IntoPyObjectExt};
 use pyo3_async_runtimes::tokio::get_runtime;
 use pyo3_bytes::PyBytes;
 use pyo3_file::PyFileLikeObject;
-use pyo3_object_store::{PyObjectStore, PyObjectStoreResult, PyPath};
+use pyo3_object_store::{PyObjectStore, PyObjectStoreError, PyObjectStoreResult, PyPath};
+use tokio::io::AsyncReadExt;
 
 use crate::attributes::PyAttributes;
 use crate::tags::PyTagSet;
@@ -200,6 +203,12 @@ pub(crate) enum PutInput {
     /// A buffer protocol object
     Buffer(Bytes),
 
+    /// A path to a file that will be opened asynchronously
+    Path(PathBuf),
+
+    /// A native file opened for asynchronous reads by `put_async`.
+    AsyncFile(AsyncFile),
+
     /// Input that we can pull from
     Pull(PullSource),
 
@@ -210,10 +219,17 @@ pub(crate) enum PutInput {
     AsyncPush(AsyncPushSource),
 }
 
+pub(crate) struct AsyncFile {
+    file: tokio::fs::File,
+    path: PathBuf,
+}
+
 impl PutInput {
     /// Whether to use multipart uploads.
     fn use_multipart(&mut self, chunk_size: NonZeroUsize) -> PyObjectStoreResult<bool> {
         match self {
+            Self::Path(_) => unreachable!("path input must be opened before use"),
+            Self::AsyncFile(_) => unreachable!("async files do not need multipart inference"),
             Self::Buffer(buffer) => Ok(buffer.len() > chunk_size.get()),
             Self::Pull(pull_source) => pull_source.use_multipart(chunk_size),
             // We always use multipart uploads for push-based sources because we have no way of
@@ -224,6 +240,15 @@ impl PutInput {
 
     async fn read_all(&mut self) -> PyObjectStoreResult<PutPayload> {
         match self {
+            Self::Path(_) => unreachable!("path input must be opened before use"),
+            Self::AsyncFile(file) => {
+                let mut buf = Vec::new();
+                file.file
+                    .read_to_end(&mut buf)
+                    .await
+                    .map_err(|error| path_io_error(&file.path, error))?;
+                Ok(Bytes::from(buf).into())
+            }
             Self::Buffer(buffer) => Ok(buffer.clone().into()),
             Self::Pull(pull_source) => {
                 let mut buf = Vec::new();
@@ -242,9 +267,7 @@ impl<'py> FromPyObject<'_, 'py> for PutInput {
     fn extract(obj: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
         let py = obj.py();
         if let Ok(path) = obj.extract::<PathBuf>() {
-            Ok(Self::Pull(PullSource::File(BufReader::new(File::open(
-                path,
-            )?))))
+            Ok(Self::Path(path))
         } else if let Ok(buffer) = obj.extract::<PyBytes>() {
             Ok(Self::Buffer(buffer.into_inner()))
         }
@@ -299,18 +322,19 @@ impl<'py> IntoPyObject<'py> for PyPutResult {
 }
 
 #[pyfunction]
-#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), max_concurrency=12))]
+#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put(
     py: Python,
     store: PyObjectStore,
     path: PyPath,
-    mut file: PutInput,
+    file: PutInput,
     attributes: Option<PyAttributes>,
     tags: Option<PyTagSet>,
     mode: Option<PyPutMode>,
     use_multipart: Option<bool>,
     chunk_size: NonZeroUsize,
+    multipart_threshold: Option<NonZeroUsize>,
     max_concurrency: usize,
 ) -> PyObjectStoreResult<PyPutResult> {
     if matches!(file, PutInput::AsyncPush(_)) {
@@ -319,10 +343,13 @@ pub(crate) fn put(
         );
     }
 
+    let mut file = py.detach(|| file.open_path_sync())?;
+
+    let multipart_threshold = multipart_threshold.unwrap_or(chunk_size);
     let mut use_multipart = if let Some(use_multipart) = use_multipart {
         use_multipart
     } else {
-        file.use_multipart(chunk_size)?
+        file.use_multipart(multipart_threshold)?
     };
 
     // If mode is provided and not Overwrite, force a non-multipart put
@@ -358,7 +385,7 @@ pub(crate) fn put(
 }
 
 #[pyfunction]
-#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), max_concurrency=12))]
+#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put_async(
     py: Python,
@@ -370,22 +397,43 @@ pub(crate) fn put_async(
     mode: Option<PyPutMode>,
     use_multipart: Option<bool>,
     chunk_size: NonZeroUsize,
+    multipart_threshold: Option<NonZeroUsize>,
     max_concurrency: usize,
 ) -> PyResult<Bound<PyAny>> {
-    let mut use_multipart = if let Some(use_multipart) = use_multipart {
+    let multipart_threshold = multipart_threshold.unwrap_or(chunk_size);
+    // Path input is the one source whose mode inference must be deferred until it is opened.
+    // Preserve the existing call-time preflight behavior for all other input types.
+    let use_multipart = if matches!(file, PutInput::Path(_)) {
         use_multipart
     } else {
-        file.use_multipart(chunk_size)?
+        Some(match use_multipart {
+            Some(use_multipart) => use_multipart,
+            None => file.use_multipart(multipart_threshold)?,
+        })
     };
 
-    // If mode is provided and not Overwrite, force a non-multipart put
-    if let Some(mode) = &mode {
-        if !matches!(mode.0, PutMode::Overwrite) {
-            use_multipart = false;
-        }
-    }
-
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let (file, mut use_multipart) = match file {
+            PutInput::Path(path) => {
+                let infer_multipart = use_multipart.is_none();
+                let (file, inferred_multipart) =
+                    open_path_async(path, multipart_threshold, infer_multipart).await?;
+                let use_multipart = use_multipart.or(inferred_multipart).unwrap_or(false);
+                (file, use_multipart)
+            }
+            file => (
+                file,
+                use_multipart.expect("multipart mode was selected before creating the future"),
+            ),
+        };
+
+        // If mode is provided and not Overwrite, force a non-multipart put
+        if let Some(mode) = &mode {
+            if !matches!(mode.0, PutMode::Overwrite) {
+                use_multipart = false;
+            }
+        }
+
         let result = if use_multipart {
             put_multipart_inner(
                 store.into_inner(),
@@ -410,6 +458,64 @@ pub(crate) fn put_async(
         };
         Ok(result)
     })
+}
+
+impl PutInput {
+    fn open_path_sync(self) -> PyResult<Self> {
+        match self {
+            Self::Path(path) => File::open(path)
+                .map(|file| Self::Pull(PullSource::File(BufReader::new(file))))
+                .map_err(PyErr::from),
+            input => Ok(input),
+        }
+    }
+}
+
+async fn open_path_async(
+    path: PathBuf,
+    multipart_threshold: NonZeroUsize,
+    infer_multipart: bool,
+) -> PyObjectStoreResult<(PutInput, Option<bool>)> {
+    let error_path = path.clone();
+    let opened = tokio::task::spawn_blocking(move || {
+        let mut file = File::open(path)?;
+        let inferred_multipart = if infer_multipart {
+            let origin_pos = file.stream_position()?;
+            let size = file.seek(SeekFrom::End(0))?;
+            file.seek(SeekFrom::Start(origin_pos))?;
+            Some(size > multipart_threshold.get() as u64)
+        } else {
+            None
+        };
+        Ok::<_, std::io::Error>((file, inferred_multipart))
+    })
+    .await
+    .map_err(|error| {
+        PyObjectStoreError::PyErr(PyRuntimeError::new_err(format!(
+            "Failed to open upload path in blocking task: {error}"
+        )))
+    })?;
+
+    let (file, inferred_multipart) = opened.map_err(|error| path_io_error(&error_path, error))?;
+    Ok((
+        PutInput::AsyncFile(AsyncFile {
+            file: tokio::fs::File::from_std(file),
+            path: error_path,
+        }),
+        inferred_multipart,
+    ))
+}
+
+fn path_io_error(path: &std::path::Path, error: std::io::Error) -> PyObjectStoreError {
+    let error = match error.raw_os_error() {
+        Some(errno) => PyOSError::new_err((
+            errno,
+            error.to_string(),
+            path.to_string_lossy().into_owned(),
+        )),
+        None => PyOSError::new_err((error.to_string(),)),
+    };
+    PyObjectStoreError::PyErr(error)
 }
 
 async fn put_inner(
@@ -474,6 +580,7 @@ async fn write_multipart(
     max_concurrency: usize,
 ) -> PyObjectStoreResult<()> {
     match reader {
+        PutInput::Path(_) => unreachable!("path input must be opened before multipart upload"),
         PutInput::Buffer(buffer) => {
             let mut offset = 0;
             while offset < buffer.len() {
@@ -494,6 +601,27 @@ async fn write_multipart(
                 writer.write(&scratch_buffer[0..read_size]);
             }
         }
+        PutInput::AsyncFile(mut file) => loop {
+            writer.wait_for_capacity(max_concurrency).await?;
+            let mut part = vec![0; chunk_size.get()];
+            let mut part_len = 0;
+            while part_len < part.len() {
+                let read_size = file
+                    .file
+                    .read(&mut part[part_len..])
+                    .await
+                    .map_err(|error| path_io_error(&file.path, error))?;
+                if read_size == 0 {
+                    break;
+                }
+                part_len += read_size;
+            }
+            if part_len == 0 {
+                break;
+            }
+            part.truncate(part_len);
+            writer.put(Bytes::from(part));
+        },
         PutInput::SyncPush(push_reader) => {
             for buf in push_reader {
                 writer.wait_for_capacity(max_concurrency).await?;
