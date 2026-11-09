@@ -186,6 +186,13 @@ async def put_async(
     synchronous `put` allows for the `file` parameter, this **also supports an async
     iterator or iterable** of buffers.
 
+    If a multipart operation is cancelled after its upload handle is obtained,
+    Obstore attempts to abort it on the native runtime without delaying cancellation.
+    This cleanup runs for at most 30 seconds. It is best-effort: initiation without
+    a received response, a failed abort, or process shutdown can still leave an
+    incomplete upload. Keep bucket lifecycle cleanup enabled. Cancellation cannot
+    undo an upload that the server has already completed.
+
     Local `Path` inputs are opened asynchronously. Errors opening the file are
     raised when awaiting this operation. Keep the source file available until
     the upload finishes.
