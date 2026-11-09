@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use object_store::memory::InMemory;
 use object_store::ObjectStoreScheme;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 use pyo3::{intern, IntoPyObjectExt};
@@ -19,7 +20,7 @@ use crate::{
 // AWS/Azure/Google config keys could overlap. And so we don't want to accidentally parse a config
 // as an AWS config before knowing that the URL scheme is AWS.
 #[pyfunction]
-#[pyo3(signature = (url, *, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
+#[pyo3(signature = (url, *, config=None, client_options=None, retry_config=None, credential_provider=None, literal_prefix=false, **kwargs))]
 pub fn from_url<'py>(
     py: Python<'py>,
     url: PyUrl,
@@ -27,13 +28,18 @@ pub fn from_url<'py>(
     client_options: Option<PyClientOptions>,
     retry_config: Option<PyRetryConfig>,
     credential_provider: Option<Bound<'py, PyAny>>,
+    literal_prefix: bool,
     kwargs: Option<Bound<'py, PyAny>>,
 ) -> PyObjectStoreResult<Bound<'py, PyAny>> {
     let (scheme, _) = ObjectStoreScheme::parse(url.as_ref()).map_err(object_store::Error::from)?;
+    if literal_prefix && scheme != ObjectStoreScheme::AmazonS3 {
+        return Err(PyValueError::new_err("literal_prefix is only supported for S3 stores").into());
+    }
     match scheme {
         ObjectStoreScheme::AmazonS3 => PyS3Store::from_url(
             &PyType::new::<PyS3Store>(py),
             url,
+            literal_prefix,
             config.map(|x| x.extract()).transpose()?,
             client_options,
             retry_config,

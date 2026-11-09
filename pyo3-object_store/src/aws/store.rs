@@ -22,6 +22,7 @@ use crate::PyUrl;
 #[derive(Debug, Clone, PartialEq)]
 struct S3Config {
     prefix: Option<PyPath>,
+    literal_prefix: bool,
     config: PyAmazonS3Config,
     client_options: Option<PyClientOptions>,
     retry_config: Option<PyRetryConfig>,
@@ -44,6 +45,7 @@ impl S3Config {
         if let Some(prefix) = &self.prefix {
             kwargs.set_item(intern!(py, "prefix"), prefix.as_ref().as_ref())?;
         }
+        kwargs.set_item(intern!(py, "literal_prefix"), self.literal_prefix)?;
         kwargs.set_item(intern!(py, "config"), &self.config)?;
         if let Some(client_options) = &self.client_options {
             kwargs.set_item(intern!(py, "client_options"), client_options)?;
@@ -79,16 +81,22 @@ impl PyS3Store {
     pub fn into_inner(self) -> Arc<MaybePrefixedStore<AmazonS3>> {
         self.store
     }
+
+    /// Whether object listing should use literal string prefixes.
+    pub fn literal_prefix_enabled(&self) -> bool {
+        self.config.literal_prefix
+    }
 }
 
 #[pymethods]
 impl PyS3Store {
     // Create from parameters
     #[new]
-    #[pyo3(signature = (bucket=None, *, prefix=None, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
+    #[pyo3(signature = (bucket=None, *, prefix=None, literal_prefix=false, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
     fn new(
         bucket: Option<String>,
         prefix: Option<PyPath>,
+        literal_prefix: bool,
         config: Option<PyAmazonS3Config>,
         client_options: Option<PyClientOptions>,
         retry_config: Option<PyRetryConfig>,
@@ -130,6 +138,7 @@ impl PyS3Store {
             store: Arc::new(MaybePrefixedStore::new(builder.build()?, prefix.clone())),
             config: S3Config {
                 prefix,
+                literal_prefix,
                 config: combined_config,
                 client_options,
                 retry_config,
@@ -139,10 +148,11 @@ impl PyS3Store {
     }
 
     #[classmethod]
-    #[pyo3(signature = (url, *, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
+    #[pyo3(signature = (url, *, literal_prefix=false, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
     pub(crate) fn from_url<'py>(
         cls: &Bound<'py, PyType>,
         url: PyUrl,
+        literal_prefix: bool,
         config: Option<PyAmazonS3Config>,
         client_options: Option<PyClientOptions>,
         retry_config: Option<PyRetryConfig>,
@@ -164,6 +174,7 @@ impl PyS3Store {
         // subclass
         let kwargs = kwargs.unwrap_or_default().into_pyobject(cls.py())?;
         kwargs.set_item("prefix", prefix)?;
+        kwargs.set_item("literal_prefix", literal_prefix)?;
         kwargs.set_item("config", config)?;
         kwargs.set_item("client_options", client_options)?;
         kwargs.set_item("retry_config", retry_config)?;
@@ -186,11 +197,20 @@ impl PyS3Store {
     fn __repr__(&self) -> String {
         let bucket = self.config.bucket();
         if let Some(prefix) = &self.config.prefix {
+            if self.config.literal_prefix {
+                return format!(
+                    "S3Store(bucket=\"{}\", prefix=\"{}\", literal_prefix=True)",
+                    bucket,
+                    prefix.as_ref()
+                );
+            }
             format!(
                 "S3Store(bucket=\"{}\", prefix=\"{}\")",
                 bucket,
                 prefix.as_ref()
             )
+        } else if self.config.literal_prefix {
+            format!("S3Store(bucket=\"{bucket}\", literal_prefix=True)")
         } else {
             format!("S3Store(bucket=\"{bucket}\")")
         }
@@ -199,6 +219,11 @@ impl PyS3Store {
     #[getter]
     fn prefix(&self) -> Option<&PyPath> {
         self.config.prefix.as_ref()
+    }
+
+    #[getter]
+    fn literal_prefix(&self) -> bool {
+        self.config.literal_prefix
     }
 
     #[getter]

@@ -560,6 +560,7 @@ class S3Store:
         bucket: str | None = None,
         *,
         prefix: str | None = None,
+        literal_prefix: bool = False,
         config: S3Config | None = None,
         client_options: ClientConfig | None = None,
         retry_config: RetryConfig | None = None,
@@ -573,6 +574,7 @@ class S3Store:
 
         Keyword Args:
             prefix: A prefix within the bucket to use for all operations.
+            literal_prefix: Use literal string prefixes for `list` operations. Defaults to `False`.
             config: AWS configuration. Values in this config will override values inferred from the environment. Defaults to None.
             client_options: HTTP Client options. Defaults to None.
             retry_config: Retry configuration. Defaults to None.
@@ -588,6 +590,7 @@ class S3Store:
         cls,
         url: str,
         *,
+        literal_prefix: bool = False,
         config: S3Config | None = None,
         client_options: ClientConfig | None = None,
         retry_config: RetryConfig | None = None,
@@ -612,6 +615,8 @@ class S3Store:
         Args:
             url: well-known storage URL.
 
+            literal_prefix: Use literal string prefixes for `list` operations. Defaults to `False`.
+
         Keyword Args:
             config: AWS Configuration. Values in this config will override values inferred from the url. Defaults to None.
             client_options: HTTP Client options. Defaults to None.
@@ -630,6 +635,9 @@ class S3Store:
     @property
     def prefix(self) -> str | None:
         """Get the prefix applied to all operations in this store, if any."""
+    @property
+    def literal_prefix(self) -> bool:
+        """Whether recursive list operations use literal string prefixes."""
     @property
     def config(self) -> S3Config:
         """Get the underlying S3 config parameters."""

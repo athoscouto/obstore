@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use url::Url;
 
+use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
 use object_store::{path::Path, CopyOptions};
 use object_store::{
     GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -220,6 +221,49 @@ impl<T: ObjectStore> ObjectStore for MaybePrefixedStore<T> {
             .delete_stream(locations)
             .map(move |location| location.map(|loc| strip_prefix(prefix.as_ref(), loc)))
             .boxed()
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: ObjectStore + PaginatedListStore> PaginatedListStore for MaybePrefixedStore<T> {
+    async fn list_paginated(
+        &self,
+        prefix: Option<&str>,
+        opts: PaginatedListOptions,
+    ) -> Result<PaginatedListResult> {
+        // Paginated listing accepts a literal string prefix. Keep it as a string instead of
+        // converting it to Path, which would add path-segment semantics to a storage API.
+        let scope = self
+            .prefix
+            .as_ref()
+            .filter(|scope| !scope.as_ref().is_empty());
+        let prefix = match (scope, prefix) {
+            (Some(scope), Some(prefix)) => Some(format!("{scope}/{prefix}")),
+            (Some(scope), None) => Some(format!("{scope}/")),
+            (None, Some(prefix)) => Some(prefix.to_owned()),
+            (None, None) => None,
+        };
+        let offset = opts.offset.map(|offset| match scope {
+            Some(scope) => format!("{scope}/{offset}"),
+            None => offset,
+        });
+        let opts = PaginatedListOptions { offset, ..opts };
+        let mut result = self.inner.list_paginated(prefix.as_deref(), opts).await?;
+        if self.prefix.is_some() {
+            result.result.objects = result
+                .result
+                .objects
+                .into_iter()
+                .map(|meta| self.strip_meta(meta))
+                .collect();
+            result.result.common_prefixes = result
+                .result
+                .common_prefixes
+                .into_iter()
+                .map(|prefix| self.strip_prefix(prefix))
+                .collect();
+        }
+        Ok(result)
     }
 }
 
