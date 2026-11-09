@@ -3,17 +3,48 @@
 from __future__ import annotations
 
 import asyncio
+import pickle
 import tomllib
+from datetime import timedelta
 from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from urllib.parse import parse_qs, urlsplit
 
 import obstore
-from obstore.store import MemoryStore
+from obstore.store import MemoryStore, S3Store
 
 
 async def main() -> None:
-    """Exercise native Path uploads below and above the multipart threshold."""
+    """Exercise the installed fork's upload, listing-config and signing APIs."""
+    store = S3Store(
+        "smoke-bucket",
+        prefix="scope",
+        literal_prefix=True,
+        region="us-east-1",
+        access_key_id="test",
+        secret_access_key="test",  # noqa: S106
+    )
+    restored = pickle.loads(pickle.dumps(store))  # noqa: S301
+    assert restored.literal_prefix is True
+    assert S3Store("smoke-bucket").literal_prefix is False
+    assert not hasattr(obstore, "list_paginated")
+    url = await obstore.sign_async(
+        restored,
+        "PUT",
+        "payload.bin",
+        timedelta(minutes=1),
+        options={
+            "extra_query": [("partNumber", "1"), ("uploadId", "smoke-upload")],
+            "signed_headers": {"content-type": "application/octet-stream"},
+        },
+    )
+    parts = urlsplit(str(url))
+    query = parse_qs(parts.query)
+    assert parts.path.endswith("/smoke-bucket/scope/payload.bin")
+    assert query["partNumber"] == ["1"]
+    assert query["uploadId"] == ["smoke-upload"]
+    assert "content-type" in query["X-Amz-SignedHeaders"][0]
     store = MemoryStore()
     with TemporaryDirectory() as directory:
         source = Path(directory) / "source.bin"

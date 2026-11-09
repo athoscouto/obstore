@@ -9,7 +9,7 @@ permissions:
 jobs:
   wheels:
     if: github.repository == 'athoscouto/obstore'
-    name: Wheel (${{ matrix.target }})
+    name: Wheel (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
