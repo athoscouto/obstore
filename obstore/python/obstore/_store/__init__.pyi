@@ -31,6 +31,7 @@ def from_url(
     client_options: ClientConfig | None = None,
     retry_config: RetryConfig | None = None,
     credential_provider: S3CredentialProvider | None = None,
+    literal_prefix: bool = False,
     **kwargs: Unpack[S3Config],
 ) -> ObjectStore: ...
 @overload

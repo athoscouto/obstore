@@ -322,6 +322,10 @@ class ObjectStoreMethods:
         """List all the objects with the given prefix.
 
         Refer to the documentation for [list][obstore.list].
+
+        When this is an S3Store constructed with `literal_prefix=True`, `prefix` is
+        passed to S3 as a literal string prefix. The setting does not affect
+        `list_with_delimiter` and `list_with_delimiter_async`.
         """
         # Splitting these fixes the typing issue with the `return_arrow` parameter, by
         # converting from a bool to a Literal[True] or Literal[False]
@@ -684,6 +688,7 @@ def from_url(
     client_options: ClientConfig | None = None,
     retry_config: RetryConfig | None = None,
     credential_provider: S3CredentialProvider | None = None,
+    literal_prefix: bool = False,
     **kwargs: Unpack[S3Config],
 ) -> ObjectStore: ...
 @overload
@@ -716,7 +721,7 @@ def from_url(
     automatic_cleanup: bool = False,
     mkdir: bool = False,
 ) -> ObjectStore: ...
-def from_url(  # noqa: C901
+def from_url(  # noqa: C901, PLR0913
     url: str,
     *,
     config: S3Config | GCSConfig | AzureConfig | None = None,
@@ -726,6 +731,7 @@ def from_url(  # noqa: C901
     | GCSCredentialProvider
     | AzureCredentialProvider
     | None = None,
+    literal_prefix: bool = False,
     **kwargs: Any,
 ) -> ObjectStore:
     """Easy construction of store by URL, identifying the relevant store.
@@ -771,6 +777,8 @@ def from_url(  # noqa: C901
         retry_config: Retry configuration. Defaults to None.
         credential_provider: A callback to provide custom credentials to the underlying
             store classes.
+        literal_prefix: Use literal string prefixes for recursive S3 list operations.
+            Defaults to `False`.
         kwargs: per-store configuration passed down to store-specific builders.
 
     """
@@ -778,12 +786,15 @@ def from_url(  # noqa: C901
     if scheme == "s3":
         return S3Store.from_url(
             url,
+            literal_prefix=literal_prefix,
             config=config,  # type: ignore[arg-type]
             client_options=client_options,
             retry_config=retry_config,
             credential_provider=credential_provider,  # type: ignore[arg-type]
             **kwargs,
         )
+    if literal_prefix:
+        raise ValueError("literal_prefix is only supported for S3 stores")
     if scheme == "gcs":
         return GCSStore.from_url(
             url,

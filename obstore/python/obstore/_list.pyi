@@ -182,6 +182,11 @@ def list(  # type: ignore[misc] # docstring in pyi file
     `foo/bar/x` but not of `foo/bar_baz/x`. List is recursive, i.e. `foo/bar/more/x`
     will be included.
 
+    For S3, constructing the store with `literal_prefix=True` sends `prefix` as an
+    exact string prefix and follows S3 continuation tokens. The default is `False`.
+    This option does not change `list_with_delimiter` or
+    `list_with_delimiter_async`.
+
     **Examples**:
 
     Synchronously iterate through list results:

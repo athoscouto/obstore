@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::ops::AddAssign;
 use std::sync::Arc;
 
@@ -5,11 +6,13 @@ use arrow::array::{
     ArrayRef, RecordBatch, StringBuilder, TimestampMicrosecondBuilder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use futures::stream::{BoxStream, Fuse};
+use futures::stream::{self, BoxStream, Fuse};
 use futures::StreamExt;
 use indexmap::IndexMap;
+use object_store::list::{PaginatedListOptions, PaginatedListStore};
+use object_store::path::Path;
 use object_store::{ListResult, ObjectMeta, ObjectStore};
-use pyo3::exceptions::{PyImportError, PyStopAsyncIteration, PyStopIteration};
+use pyo3::exceptions::{PyImportError, PyStopAsyncIteration, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::{intern, IntoPyObjectExt};
@@ -351,9 +354,9 @@ impl<'py> IntoPyObject<'py> for PyListResult {
 #[pyo3(signature = (store, prefix=None, *, offset=None, chunk_size=50, return_arrow=false))]
 pub(crate) fn list(
     py: Python,
-    store: PyObjectStore,
-    prefix: Option<PyPath>,
-    offset: Option<PyPath>,
+    store: Bound<PyAny>,
+    prefix: Option<String>,
+    offset: Option<String>,
     chunk_size: usize,
     return_arrow: bool,
 ) -> PyObjectStoreResult<PyListStream> {
@@ -369,16 +372,73 @@ pub(crate) fn list(
             .map_err(|err| PyImportError::new_err(format!("{msg}\n\n{err}")))?;
     }
 
-    let store = store.into_inner().clone();
-    let prefix = prefix.map(|s| s.into());
+    let s3_store = store.cast::<pyo3_object_store::PyS3Store>().ok();
+    let literal_prefix_enabled = s3_store.is_some_and(|store| store.get().literal_prefix_enabled());
+    if literal_prefix_enabled {
+        let s3_store = s3_store.expect("literal prefix mode requires an S3 store");
+        let store: Arc<dyn PaginatedListStore> = s3_store.get().as_ref().clone();
+        let stream = paginated_list_stream(store, prefix, offset);
+        return Ok(PyListStream::new(stream, chunk_size, return_arrow));
+    }
+
+    let object_store = store.as_borrowed().extract::<PyObjectStore>()?.into_inner();
+    let prefix = prefix
+        .map(|prefix| {
+            Path::parse(&prefix)
+                .map_err(|err| PyValueError::new_err(format!("Could not parse path: {err}")))
+        })
+        .transpose()?;
+    let offset = offset
+        .map(|offset| {
+            Path::parse(&offset)
+                .map_err(|err| PyValueError::new_err(format!("Could not parse path: {err}")))
+        })
+        .transpose()?;
     let stream = py.detach(|| {
         if let Some(offset) = offset {
-            store.list_with_offset(prefix.as_ref(), offset.as_ref())
+            object_store.list_with_offset(prefix.as_ref(), &offset)
         } else {
-            store.list(prefix.as_ref())
+            object_store.list(prefix.as_ref())
         }
     });
     Ok(PyListStream::new(stream, chunk_size, return_arrow))
+}
+
+fn paginated_list_stream(
+    store: Arc<dyn PaginatedListStore>,
+    prefix: Option<String>,
+    offset: Option<String>,
+) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+    stream::try_unfold(
+        (
+            store,
+            prefix,
+            offset,
+            None::<String>,
+            VecDeque::new(),
+            false,
+        ),
+        |(store, prefix, mut offset, mut page_token, mut objects, mut done)| async move {
+            while objects.is_empty() && !done {
+                let result = store
+                    .list_paginated(
+                        prefix.as_deref(),
+                        PaginatedListOptions {
+                            offset: offset.take(),
+                            page_token: page_token.take(),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                objects.extend(result.result.objects);
+                page_token = result.page_token;
+                done = page_token.is_none();
+            }
+            let object = objects.pop_front();
+            Ok(object.map(|object| (object, (store, prefix, offset, page_token, objects, done))))
+        },
+    )
+    .boxed()
 }
 
 #[pyfunction]
