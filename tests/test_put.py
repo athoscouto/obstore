@@ -178,7 +178,10 @@ finally:
     )
 
 
-def _start_delayed_fifo_data_writer(path: Path, delay: float) -> subprocess.Popen[bytes]:
+def _start_delayed_fifo_data_writer(
+    path: Path,
+    delay: float,
+) -> subprocess.Popen[bytes]:
     writer_script = """
 import os
 import sys
@@ -269,6 +272,7 @@ async def test_put_path_open_does_not_block_event_loop(tmp_path: Path, api: str)
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires named pipes")
 @pytest.mark.parametrize("use_multipart", [False, True])
 async def test_put_async_path_read_does_not_block_event_loop(
+    *,
     tmp_path: Path,
     use_multipart: bool,
 ):
