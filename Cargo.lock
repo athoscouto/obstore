@@ -1481,6 +1481,7 @@ name = "obstore"
 version = "0.12.1+athos.1"
 dependencies = [
  "arrow",
+ "async-trait",
  "bytes",
  "cargo-lock",
  "chrono",

@@ -26,6 +26,7 @@ use pyo3_object_store::{PyObjectStore, PyObjectStoreError, PyObjectStoreResult, 
 use tokio::io::AsyncReadExt;
 
 use crate::attributes::PyAttributes;
+use crate::multipart::AbortOnDrop;
 use crate::tags::PyTagSet;
 
 pub(crate) struct PyPutMode(PutMode);
@@ -561,13 +562,15 @@ async fn put_multipart_inner(
     }
 
     let upload = store.put_multipart_opts(path, opts).await?;
-    let mut writer = WriteMultipart::new_with_chunk_size(upload, chunk_size.get());
+    let mut writer =
+        WriteMultipart::new_with_chunk_size(Box::new(AbortOnDrop::new(upload)), chunk_size.get());
 
     // Make sure to call abort if the multipart upload failed for any reason
     match write_multipart(&mut writer, reader, chunk_size, max_concurrency).await {
         Ok(()) => Ok(PyPutResult(writer.finish().await?)),
         Err(err) => {
-            writer.abort().await?;
+            // Cleanup must not replace the original producer/transfer error.
+            let _ = writer.abort().await;
             Err(err)
         }
     }

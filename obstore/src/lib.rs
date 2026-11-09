@@ -8,6 +8,7 @@ mod delete;
 mod get;
 mod head;
 mod list;
+mod multipart;
 mod path;
 mod put;
 mod rename;
