@@ -12,10 +12,14 @@ import subprocess
 import tempfile
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    import io
     import socket
+
+    from obstore import Attributes
+    from obstore.store import ClientConfig
 
 
 class _Receiver(socketserver.ThreadingTCPServer):
@@ -58,7 +62,7 @@ class _Handler(socketserver.BaseRequestHandler):
 def _tunnel(
     proxy: socket.socket,
     tls: ssl.SSLContext,
-) -> tuple[socket.socket, BinaryIO]:
+) -> tuple[socket.socket, io.BufferedIOBase]:
     request = proxy.makefile("rb")
     connect_line = request.readline()
     if not connect_line.startswith(b"CONNECT "):
@@ -71,7 +75,7 @@ def _tunnel(
     return connection, connection.makefile("rwb")
 
 
-def _read_request(stream: BinaryIO) -> tuple[bytes, dict[bytes, bytes], bytes]:
+def _read_request(stream: io.BufferedIOBase) -> tuple[bytes, dict[bytes, bytes], bytes]:
     request_line = stream.readline()
     if not request_line.startswith(b"PUT "):
         raise AssertionError("expected a PUT request")
@@ -87,7 +91,7 @@ def _read_request(stream: BinaryIO) -> tuple[bytes, dict[bytes, bytes], bytes]:
     return request_line.strip(), headers, body
 
 
-def _read_headers(stream: BinaryIO) -> dict[bytes, bytes]:
+def _read_headers(stream: io.BufferedIOBase) -> dict[bytes, bytes]:
     headers: dict[bytes, bytes] = {}
     while True:
         line = stream.readline()
@@ -97,7 +101,7 @@ def _read_headers(stream: BinaryIO) -> dict[bytes, bytes]:
         headers[name.strip().lower()] = value.strip()
 
 
-def _read_http_chunks(stream: BinaryIO) -> bytes:
+def _read_http_chunks(stream: io.BufferedIOBase) -> bytes:
     body = bytearray()
     while True:
         size = int(stream.readline().split(b";", 1)[0].strip(), 16)
@@ -109,7 +113,7 @@ def _read_http_chunks(stream: BinaryIO) -> bytes:
         stream.read(2)
 
 
-def _read_length(stream: BinaryIO, length: int) -> bytes:
+def _read_length(stream: io.BufferedIOBase, length: int) -> bytes:
     body = bytearray()
     while len(body) < length:
         piece = stream.read(min(65536, length - len(body)))
@@ -138,10 +142,11 @@ def _decode_aws_chunked(wire: bytes) -> tuple[bytes, dict[bytes, bytes]]:
         offset += size + 2
 
 
-def _create_cert(root: Path) -> tuple[Path, Path]:
+def _create_cert(root: Path) -> tuple[Path, Path, Path]:
     openssl = shutil.which("openssl")
     if openssl is None:
         raise RuntimeError("OpenSSL is required for the local TLS smoke receiver")
+    ca_cert, ca_key = root / "ca.pem", root / "ca-key.pem"
     cert, key = root / "cert.pem", root / "key.pem"
     subprocess.run(  # noqa: S603 - executable and arguments are fixed test inputs
         [
@@ -151,28 +156,81 @@ def _create_cert(root: Path) -> tuple[Path, Path]:
             "-newkey",
             "rsa:2048",
             "-nodes",
+            "-sha256",
             "-keyout",
-            str(key),
+            str(ca_key),
             "-out",
-            str(cert),
+            str(ca_cert),
             "-days",
             "1",
             "-subj",
-            "/CN=s3.us-east-1.amazonaws.com",
+            "/CN=Obstore smoke test CA",
             "-addext",
-            "subjectAltName=DNS:s3.us-east-1.amazonaws.com",
+            "basicConstraints=critical,CA:TRUE,pathlen:0",
             "-addext",
-            "basicConstraints=critical,CA:FALSE",
+            "keyUsage=critical,keyCertSign,cRLSign",
             "-addext",
-            "keyUsage=critical,digitalSignature,keyEncipherment",
-            "-addext",
-            "extendedKeyUsage=serverAuth",
+            "subjectKeyIdentifier=hash",
         ],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    return cert, key
+    csr = root / "server.csr"
+    subprocess.run(  # noqa: S603 - executable and arguments are fixed test inputs
+        [
+            openssl,
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(csr),
+            "-subj",
+            "/CN=s3.us-east-1.amazonaws.com",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    extensions = root / "server-extensions.cnf"
+    extensions.write_text(
+        """subjectAltName=DNS:s3.us-east-1.amazonaws.com
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+""",
+    )
+    subprocess.run(  # noqa: S603 - executable and arguments are fixed test inputs
+        [
+            openssl,
+            "x509",
+            "-req",
+            "-in",
+            str(csr),
+            "-CA",
+            str(ca_cert),
+            "-CAkey",
+            str(ca_key),
+            "-CAcreateserial",
+            "-out",
+            str(cert),
+            "-days",
+            "1",
+            "-sha256",
+            "-extfile",
+            str(extensions),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return cert, key, ca_cert
 
 
 def _assert_smoke(
@@ -227,8 +285,8 @@ def _assert_request(
         raise AssertionError(
             "streaming upload was not signed with configured credentials",
         )
-    expected = base64.b64encode(hashlib.sha256(payload).digest())
-    if trailers.get(b"x-amz-checksum-sha256") != expected:
+    expected_checksum = base64.b64encode(hashlib.sha256(payload).digest())
+    if trailers.get(b"x-amz-checksum-sha256") != expected_checksum:
         raise AssertionError("streaming upload checksum trailer did not match source")
 
 
@@ -254,7 +312,7 @@ async def run_smoke() -> None:
 
     with tempfile.TemporaryDirectory(prefix="obstore-stream-smoke-") as temp:
         root = Path(temp)
-        cert, key = await asyncio.to_thread(_create_cert, root)
+        cert, key, ca_cert = await asyncio.to_thread(_create_cert, root)
         receiver = _Receiver(cert, key)
         thread = threading.Thread(target=receiver.serve_forever, daemon=True)
         thread.start()
@@ -264,7 +322,7 @@ async def run_smoke() -> None:
             )
             source = root / "source.bin"
             source.write_bytes(payload)
-            cases = (
+            cases: tuple[tuple[str, ClientConfig, Attributes, bytes], ...] = (
                 ("default", {}, {}, b"aws-chunked"),
                 (
                     "configured",
@@ -279,6 +337,7 @@ async def run_smoke() -> None:
                     b"explicit,aws-chunked",
                 ),
             )
+            store = None
             for name, client_options, attributes, _expected_encoding in cases:
                 store = S3Store(
                     config={
@@ -294,7 +353,7 @@ async def run_smoke() -> None:
                     client_options={
                         **client_options,
                         "proxy_url": f"http://127.0.0.1:{receiver.server_address[1]}",
-                        "root_certificate": cert.read_text(),
+                        "root_certificate": ca_cert.read_text(),
                     },
                 )
                 upload_attributes = dict(attributes)
@@ -318,10 +377,16 @@ async def run_smoke() -> None:
             )
             # The same eligible S3 endpoint must retain buffered byte uploads and
             # conditional writes rather than applying streaming indiscriminately.
-            for name, body, mode in (
+            if store is None:
+                raise AssertionError("no S3 store was configured for fallback checks")
+            fallback_cases: tuple[
+                tuple[str, bytes | Path, Literal["create"] | None],
+                ...,
+            ] = (
                 ("bytes", payload, None),
                 ("create", source, "create"),
-            ):
+            )
+            for name, body, mode in fallback_cases:
                 await asyncio.wait_for(
                     obstore.put_async(store, f"buffered-{name}.bin", body, mode=mode),
                     timeout=60,
