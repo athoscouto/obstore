@@ -1,0 +1,913 @@
+--- a/src/aws/client.rs
++++ b/src/aws/client.rs
+@@ -19,12 +19,12 @@
+ use crate::aws::checksum::Checksum;
+ use crate::aws::credential::{AwsCredential, CredentialExt};
+ use crate::aws::{
+-    AwsAuthorizer, AwsCredentialProvider, COPY_SOURCE_HEADER, S3ConditionalPut, S3CopyIfNotExists,
++    AwsAuthorizer, AwsCredentialProvider, S3ConditionalPut, S3CopyIfNotExists, COPY_SOURCE_HEADER,
+     STORE, STRICT_PATH_ENCODE_SET, TAGS_HEADER,
+ };
+ use crate::client::builder::{HttpRequestBuilder, RequestBuilderError};
+ use crate::client::get::GetClient;
+-use crate::client::header::{HeaderConfig, get_etag};
++use crate::client::header::{get_etag, HeaderConfig};
+ use crate::client::header::{get_put_result, get_version};
+ use crate::client::list::ListClient;
+ use crate::client::retry::{RetryContext, RetryExt};
+@@ -33,8 +33,8 @@
+     InitiateMultipartUploadResult, ListResponse, PartMetadata,
+ };
+ use crate::client::{
+-    CryptoProvider, DigestAlgorithm, GetOptionsExt, HttpClient, HttpError, HttpResponse,
+-    crypto_provider,
++    crypto_provider, CryptoProvider, DigestAlgorithm, GetOptionsExt, HttpClient, HttpError,
++    HttpResponse,
+ };
+ use crate::list::{PaginatedListOptions, PaginatedListResult};
+ use crate::multipart::PartId;
+@@ -43,8 +43,8 @@
+     PutMultipartOptions, PutPayload, PutResult, Result, RetryConfig, TagSet,
+ };
+ use async_trait::async_trait;
++use base64::prelude::BASE64_STANDARD;
+ use base64::Engine;
+-use base64::prelude::BASE64_STANDARD;
+ use bytes::{Buf, Bytes};
+ use http::header::{
+     CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_LENGTH,
+@@ -53,7 +53,7 @@
+ use http::{HeaderMap, HeaderName, Method};
+ use itertools::Itertools;
+ use md5::{Digest, Md5};
+-use percent_encoding::{PercentEncode, utf8_percent_encode};
++use percent_encoding::{utf8_percent_encode, PercentEncode};
+ use quick_xml::events::{self as xml_events};
+ use serde::{Deserialize, Serialize};
+ use std::sync::Arc;
+@@ -450,16 +450,40 @@
+         Ok(self)
+     }
+ 
++    #[cfg(not(target_arch = "wasm32"))]
++    pub(crate) fn with_streaming_file(
++        mut self,
++        source: Arc<crate::client::StreamingFile>,
++        content_encoding: Option<&str>,
++        decoded_length: u64,
++    ) -> Self {
++        let encoding = match content_encoding {
++            Some(value) => format!("{value},aws-chunked"),
++            None => "aws-chunked".to_string(),
++        };
++        self.builder = self
++            .builder
++            .header(CONTENT_ENCODING, encoding)
++            .header(CONTENT_LENGTH, source.length().to_string())
++            .header("x-amz-decoded-content-length", decoded_length.to_string())
++            .header("x-amz-trailer", "x-amz-checksum-sha256")
++            .header("x-amz-sdk-checksum-algorithm", "SHA256")
++            .body(crate::client::HttpRequestBody::streaming_file(source));
++        self
++    }
++
+     pub(crate) async fn send(self) -> Result<HttpResponse, RequestError> {
+-        let credential = match self.use_session_creds {
+-            true => self.config.get_session_credential().await?,
+-            false => {
+-                let credential = self.config.get_credential().await?;
+-                credential.map(|credential| SessionCredential {
+-                    credential,
+-                    session_token: false,
+-                    config: self.config,
+-                })
++        let credential = {
++                match self.use_session_creds {
++                true => self.config.get_session_credential().await?,
++                false => {
++                    let credential = self.config.get_credential().await?;
++                    credential.map(|credential| SessionCredential {
++                        credential,
++                        session_token: false,
++                        config: self.config,
++                    })
++                }
+             }
+         };
+         let authorizer = credential.as_ref().map(|x| x.authorizer()).transpose()?;
+@@ -467,8 +491,8 @@
+         let sha = self.payload_sha256.as_ref().map(|x| x.as_ref());
+ 
+         let path = self.path.as_ref();
+-        self.builder
+-            .with_aws_sigv4(authorizer, sha)?
++        let builder = self.builder.with_aws_sigv4(authorizer, sha)?;
++        builder
+             .retryable(&self.config.retry_config)
+             .retry_on_conflict(self.retry_on_conflict)
+             .idempotent(self.idempotent)
+@@ -1051,18 +1075,18 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::GetOptions;
+-    use crate::ObjectStore;
+     use crate::aws::{AmazonS3, AmazonS3Builder};
+-    use crate::client::HttpClient;
+     use crate::client::get::GetClient;
+     use crate::client::mock_server::MockServer;
+     use crate::client::retry::RetryContext;
++    use crate::client::HttpClient;
++    use crate::GetOptions;
++    use crate::ObjectStore;
+     use futures_util::{StreamExt, TryStreamExt};
++    use http::header::{AUTHORIZATION, CONTENT_LENGTH};
+     use http::Response;
+-    use http::header::{AUTHORIZATION, CONTENT_LENGTH};
++    use hyper::body::Incoming;
+     use hyper::Request;
+-    use hyper::body::Incoming;
+ 
+     #[cfg(feature = "reqwest")]
+     #[tokio::test]
+--- a/src/aws/credential.rs
++++ b/src/aws/credential.rs
+@@ -20,15 +20,15 @@
+ use crate::client::retry::RetryExt;
+ use crate::client::token::{TemporaryToken, TokenCache};
+ use crate::client::{
+-    CryptoProvider, DigestAlgorithm, HttpClient, HttpError, HttpRequest, TokenProvider,
+-    crypto_provider,
++    crypto_provider, CryptoProvider, DigestAlgorithm, HttpClient, HttpError, HttpRequest,
++    TokenProvider,
+ };
+ use crate::util::{append_strict_query_pairs, hex_digest, hex_encode};
+ use crate::{CredentialProvider, Result, RetryConfig};
+ use async_trait::async_trait;
+ use bytes::Buf;
+ use chrono::{DateTime, Utc};
+-use http::header::{AUTHORIZATION, HOST, HeaderMap, HeaderName, HeaderValue};
++use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, HOST};
+ use http::{Method, StatusCode};
+ use percent_encoding::utf8_percent_encode;
+ use serde::Deserialize;
+@@ -232,18 +232,22 @@
+         let date_val = HeaderValue::from_str(&date_str).unwrap();
+         request.headers_mut().insert(&DATE_HEADER, date_val);
+ 
+-        let digest = match self.sign_payload {
+-            false => UNSIGNED_PAYLOAD.to_string(),
+-            true => match pre_calculated_digest {
+-                Some(digest) => hex_encode(digest),
+-                None => match request.body().is_empty() {
+-                    true => EMPTY_SHA256_HASH.to_string(),
+-                    false => match request.body().as_bytes() {
+-                        Some(bytes) => hex_digest(crypto, bytes)?,
+-                        None => STREAMING_PAYLOAD.to_string(),
++        let digest = if request.body().is_streaming_file() {
++            "STREAMING-UNSIGNED-PAYLOAD-TRAILER".to_string()
++        } else {
++            match self.sign_payload {
++                false => UNSIGNED_PAYLOAD.to_string(),
++                true => match pre_calculated_digest {
++                    Some(digest) => hex_encode(digest),
++                    None => match request.body().is_empty() {
++                        true => EMPTY_SHA256_HASH.to_string(),
++                        false => match request.body().as_bytes() {
++                            Some(bytes) => hex_digest(crypto, bytes)?,
++                            None => STREAMING_PAYLOAD.to_string(),
++                        },
+                     },
+                 },
+-            },
++            }
+         };
+ 
+         let header_digest = HeaderValue::from_str(&digest).unwrap();
+@@ -955,8 +959,8 @@
+ mod tests {
+     use super::*;
+     use crate::aws::{AmazonS3Builder, AmazonS3ConfigKey};
++    use crate::client::mock_server::MockServer;
+     use crate::client::HttpClient;
+-    use crate::client::mock_server::MockServer;
+     use http::{Method, Response};
+     #[cfg(feature = "reqwest")]
+     use reqwest::Client;
+--- a/src/aws/mod.rs
++++ b/src/aws/mod.rs
+@@ -40,13 +40,13 @@
+ use url::Url;
+ 
+ use crate::aws::client::{CompleteMultipartMode, PutPartPayload, RequestError, S3Client};
+-use crate::client::CredentialProvider;
+ use crate::client::get::GetClientExt;
+ use crate::client::list::{ListClient, ListClientExt};
++use crate::client::CredentialProvider;
+ use crate::multipart::{MultipartStore, PartId};
+ use crate::retry::{MultipartRetry, RetryPolicy};
+ use crate::signer::{SignedUrlOptions, Signer};
+-use crate::util::{STRICT_ENCODE_SET, validate_signed_url_extras};
++use crate::util::{validate_signed_url_extras, STRICT_ENCODE_SET};
+ use crate::{
+     CopyMode, CopyOptions, Error, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload,
+     ObjectMeta, ObjectStore, Path, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+@@ -99,6 +99,105 @@
+     /// Returns the [`AwsCredentialProvider`] used by [`AmazonS3`]
+     pub fn credentials(&self) -> &AwsCredentialProvider {
+         &self.client.config.credentials
++    }
++
++    /// Whether a file upload can use the private single-request streaming path.
++    #[doc(hidden)]
++    #[cfg(not(target_arch = "wasm32"))]
++    pub fn supports_file_stream(&self, opts: &PutOptions, length: u64) -> bool {
++        let endpoint = match Url::parse(&self.client.config.bucket_endpoint) {
++            Ok(endpoint) => endpoint,
++            Err(_) => return false,
++        };
++        let Some(host) = endpoint.host_str() else {
++            return false;
++        };
++        let aws_host = host == "amazonaws.com"
++            || host.ends_with(".amazonaws.com")
++            || host == "amazonaws.com.cn"
++            || host.ends_with(".amazonaws.com.cn");
++        let no_explicit_encryption = self.client.config.encryption_headers.0.is_empty();
++        matches!(opts.mode, PutMode::Overwrite)
++            && length <= 32 * 1024 * 1024
++            && endpoint.scheme() == "https"
++            && aws_host
++            && !host.contains("s3express-")
++            && !self.client.config.is_s3_express()
++            && !self.client.config.skip_signature
++            && self.client.config.checksum.is_none_or(|checksum| checksum == Checksum::SHA256)
++            && no_explicit_encryption
++    }
++
++    /// Upload a stable regular file with a SHA256 checksum trailer.
++    /// The source must remain unchanged until this future completes, including retries.
++    #[doc(hidden)]
++    #[cfg(not(target_arch = "wasm32"))]
++    pub async fn put_file_stream_opts(
++        &self,
++        location: &Path,
++        file: std::fs::File,
++        length: u64,
++        chunk_size: usize,
++        mut opts: PutOptions,
++    ) -> Result<PutResult> {
++        if !self.supports_file_stream(&opts, length) {
++            return Err(Error::NotSupported {
++                source:
++                    "file streaming requires an eligible authenticated HTTPS S3 overwrite"
++                        .into(),
++            });
++        }
++        if !(8192..=1024 * 1024).contains(&chunk_size) {
++            return Err(Error::NotSupported {
++                source: "S3 streaming chunks must be in 8 KiB..=1 MiB".into(),
++            });
++        }
++        let crypto = self.client.config.crypto.clone();
++        let source = tokio::task::spawn_blocking(move || {
++            crate::client::StreamingFile::new(file, length, chunk_size, crypto)
++        })
++        .await
++        .map_err(|source| Error::Generic {
++            store: STORE,
++            source: Box::new(source),
++        })?
++        .map_err(|source| Error::Generic {
++            store: STORE,
++            source: Box::new(source),
++        })?;
++        let encoding =
++            if let Some(value) = opts.attributes.remove(&crate::Attribute::ContentEncoding) {
++                Some(value.as_ref().to_owned())
++            } else {
++                self.client
++                    .config
++                    .client_options
++                    .get_default_headers()
++                    .and_then(|headers| headers.get(::http::header::CONTENT_ENCODING))
++                    .map(|value| value.to_str().map(str::to_owned))
++                    .transpose()
++                    .map_err(|source| Error::Generic {
++                        store: STORE,
++                        source: Box::new(source),
++                    })?
++            };
++        let source = Arc::new(source);
++        // Keep one cancellation boundary around the entire retry operation.
++        let cancel_on_drop = source.cancel_on_drop();
++        let result = self
++            .client
++            .request(Method::PUT, location)
++            .with_attributes(opts.attributes)
++            .with_tags(opts.tags)
++            .with_extensions(opts.extensions)
++            .with_encryption_headers()
++            .with_streaming_file(source, encoding.as_deref(), length)
++            .idempotent(true)
++            .do_put()
++            .await
++            .map_err(Into::into);
++        drop(cancel_on_drop);
++        result
+     }
+ 
+     /// Create a full URL to the resource specified by `path` with this instance's configuration.
+@@ -735,25 +834,25 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::ClientOptions;
+-    use crate::ObjectStoreExt;
+-    #[cfg(feature = "reqwest")]
+-    use crate::client::SpawnedReqwestConnector;
+     use crate::client::get::GetClient;
+     #[cfg(feature = "reqwest")]
+     use crate::client::mock_server::MockServer;
+     use crate::client::retry::RetryContext;
++    #[cfg(feature = "reqwest")]
++    use crate::client::SpawnedReqwestConnector;
+     use crate::integration::*;
+     use crate::tests::*;
++    use crate::ClientOptions;
++    use crate::ObjectStoreExt;
++    use base64::prelude::BASE64_STANDARD;
+     use base64::Engine;
+-    use base64::prelude::BASE64_STANDARD;
++    #[cfg(feature = "reqwest")]
++    use http::header::ETAG;
+     use http::HeaderMap;
+     use http::HeaderValue;
+     #[cfg(feature = "reqwest")]
+     use http::Response;
+     #[cfg(feature = "reqwest")]
+-    use http::header::ETAG;
+-    #[cfg(feature = "reqwest")]
+     use std::sync::atomic::{AtomicUsize, Ordering};
+ 
+     const NON_EXISTENT_NAME: &str = "nonexistentname";
+@@ -764,6 +863,62 @@
+     /// Set `OBJECT_STORE_SIGNING_BUCKET` to run them against a bucket in your own account
+     /// (e.g. real S3) without editing this source; it defaults to `test-bucket-for-signing`.
+     const DEFAULT_SIGNING_BUCKET: &str = "test-bucket-for-signing";
++
++    fn streaming_capability_store(endpoint: &str) -> AmazonS3 {
++        AmazonS3Builder::new()
++            .with_bucket_name("test-bucket")
++            .with_region("us-east-1")
++            .with_endpoint(endpoint)
++            .with_access_key_id("key")
++            .with_secret_access_key("secret")
++            .build()
++            .unwrap()
++    }
++
++    #[cfg(not(target_arch = "wasm32"))]
++    #[test]
++    fn file_stream_capability_accepts_only_eligible_aws_overwrites() {
++        let opts = PutOptions::default();
++        for endpoint in [
++            "https://s3.us-east-1.amazonaws.com",
++            "https://bucket.s3.us-west-2.amazonaws.com",
++            "https://s3.us-east-1.amazonaws.com.cn",
++        ] {
++            let store = streaming_capability_store(endpoint);
++            assert!(store.supports_file_stream(&opts, 32 * 1024 * 1024));
++            assert!(!store.supports_file_stream(&opts, 32 * 1024 * 1024 + 1));
++        }
++
++        for endpoint in [
++            "http://s3.us-east-1.amazonaws.com",
++            "https://s3.us-east-1.amazonaws.com.evil.example",
++            "https://s3express-us-east-1.amazonaws.com",
++            "https://storage.example.com",
++        ] {
++            let store = streaming_capability_store(endpoint);
++            assert!(!store.supports_file_stream(&opts, 1));
++        }
++
++        let store = streaming_capability_store("https://s3.us-east-1.amazonaws.com");
++        let mut conditional = PutOptions::default();
++        conditional.mode = PutMode::Create;
++        assert!(!store.supports_file_stream(&conditional, 1));
++    }
++
++    #[cfg(not(target_arch = "wasm32"))]
++    #[test]
++    fn file_stream_capability_rejects_explicit_crc_checksum_policy() {
++        let store = AmazonS3Builder::new()
++            .with_bucket_name("test-bucket")
++            .with_region("us-east-1")
++            .with_endpoint("https://s3.us-east-1.amazonaws.com")
++            .with_access_key_id("key")
++            .with_secret_access_key("secret")
++            .with_checksum_algorithm(Checksum::CRC64NVME)
++            .build()
++            .unwrap();
++        assert!(!store.supports_file_stream(&PutOptions::default(), 1));
++    }
+ 
+     fn signing_bucket() -> String {
+         std::env::var("OBJECT_STORE_SIGNING_BUCKET")
+--- a/src/client/http/body.rs
++++ b/src/client/http/body.rs
+@@ -16,14 +16,16 @@
+ // under the License.
+ 
+ use crate::client::{HttpError, HttpErrorKind};
+-use crate::{PutPayload, collect_bytes};
++use crate::{collect_bytes, PutPayload};
+ use bytes::Bytes;
++use futures_util::stream::BoxStream;
+ use futures_util::StreamExt;
+-use futures_util::stream::BoxStream;
+ use http_body_util::combinators::BoxBody;
+ use http_body_util::{BodyExt, Full};
+ use hyper::body::{Body, Frame, SizeHint};
+ use std::pin::Pin;
++#[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++use std::sync::Arc;
+ use std::task::{Context, Poll};
+ 
+ /// An HTTP Request
+@@ -34,6 +36,24 @@
+ pub struct HttpRequestBody(Inner);
+ 
+ impl HttpRequestBody {
++    #[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++    pub(crate) fn streaming_file(source: Arc<super::StreamingFile>) -> Self {
++        let remaining = source.length();
++        Self(Inner::File(ReplayableFile {
++            source,
++            stream: None,
++            remaining,
++        }))
++    }
++
++    pub(crate) fn is_streaming_file(&self) -> bool {
++        #[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++        if matches!(self.0, Inner::File(_)) {
++            return true;
++        }
++        false
++    }
++
+     /// An empty [`HttpRequestBody`]
+     pub fn empty() -> Self {
+         Self(Inner::Bytes(Bytes::new()))
+@@ -42,10 +62,16 @@
+     #[cfg(all(feature = "reqwest", not(target_arch = "wasm32")))]
+     pub(crate) fn into_reqwest(self) -> reqwest::Body {
+         match self.0 {
++            #[cfg(feature = "aws-base")]
++            Inner::File(file) => reqwest::Body::wrap_stream(file.source.stream()),
+             Inner::Bytes(b) => b.into(),
+-            Inner::PutPayload(_, payload) => reqwest::Body::wrap_stream(
+-                futures_util::stream::iter(payload.into_iter().map(Ok::<_, HttpError>)),
+-            ),
++            Inner::PutPayload(_, payload) => {
++                reqwest::Body::wrap_stream(futures_util::stream::iter(payload.into_iter().map(
++                    move |chunk| {
++                        Ok::<_, HttpError>(chunk)
++                    },
++                )))
++            }
+         }
+     }
+ 
+@@ -60,6 +86,8 @@
+     /// Returns true if this body is empty
+     pub fn is_empty(&self) -> bool {
+         match &self.0 {
++            #[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++            Inner::File(_) => false,
+             Inner::Bytes(x) => x.is_empty(),
+             Inner::PutPayload(_, x) => x.iter().any(|x| !x.is_empty()),
+         }
+@@ -68,6 +96,8 @@
+     /// Returns the total length of the [`Bytes`] in this body
+     pub fn content_length(&self) -> usize {
+         match &self.0 {
++            #[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++            Inner::File(file) => file.remaining,
+             Inner::Bytes(x) => x.len(),
+             Inner::PutPayload(_, x) => x.content_length(),
+         }
+@@ -108,8 +138,37 @@
+ 
+ #[derive(Debug, Clone)]
+ enum Inner {
++    #[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++    File(ReplayableFile),
+     Bytes(Bytes),
+     PutPayload(usize, PutPayload),
++}
++
++#[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++struct ReplayableFile {
++    source: Arc<super::StreamingFile>,
++    stream: Option<BoxStream<'static, Result<Bytes, HttpError>>>,
++    remaining: usize,
++}
++
++#[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++impl Clone for ReplayableFile {
++    fn clone(&self) -> Self {
++        Self {
++            source: self.source.clone(),
++            stream: None,
++            remaining: self.source.length(),
++        }
++    }
++}
++
++#[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++impl std::fmt::Debug for ReplayableFile {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ReplayableFile")
++            .field("remaining", &self.remaining)
++            .finish_non_exhaustive()
++    }
+ }
+ 
+ impl Body for HttpRequestBody {
+@@ -118,9 +177,22 @@
+ 
+     fn poll_frame(
+         mut self: Pin<&mut Self>,
+-        _cx: &mut Context<'_>,
++        cx: &mut Context<'_>,
+     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+         Poll::Ready(match &mut self.0 {
++            #[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++            Inner::File(file) => {
++                let stream = file.stream.get_or_insert_with(|| file.source.stream());
++                return match stream.as_mut().poll_next(cx) {
++                    Poll::Ready(Some(Ok(bytes))) => {
++                        file.remaining -= bytes.len();
++                        Poll::Ready(Some(Ok(Frame::data(bytes))))
++                    }
++                    Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
++                    Poll::Ready(None) => Poll::Ready(None),
++                    Poll::Pending => Poll::Pending,
++                };
++            }
+             Inner::Bytes(bytes) => {
+                 let out = bytes.split_off(0);
+                 if out.is_empty() {
+@@ -144,6 +216,8 @@
+ 
+     fn is_end_stream(&self) -> bool {
+         match self.0 {
++            #[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++            Inner::File(ref file) => file.remaining == 0,
+             Inner::Bytes(ref bytes) => bytes.is_empty(),
+             Inner::PutPayload(offset, ref body) => offset == body.as_ref().len(),
+         }
+@@ -151,6 +225,8 @@
+ 
+     fn size_hint(&self) -> SizeHint {
+         match self.0 {
++            #[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++            Inner::File(ref file) => SizeHint::with_exact(file.remaining as u64),
+             Inner::Bytes(ref bytes) => SizeHint::with_exact(bytes.len() as u64),
+             Inner::PutPayload(offset, ref payload) => {
+                 let iter = payload.as_ref().iter().skip(offset);
+@@ -240,3 +316,32 @@
+         Bytes::from(value).into()
+     }
+ }
++
++#[cfg(all(test, feature = "aws-base", not(target_arch = "wasm32")))]
++mod streaming_tests {
++    use super::*;
++    use std::io::Write;
++
++    #[tokio::test]
++    async fn partially_consumed_hyper_body_clone_replays_from_zero() {
++        let mut file = tempfile::tempfile().unwrap();
++        file.write_all(b"abcdef").unwrap();
++        let source = Arc::new(super::super::StreamingFile::new(file, 6, 3, None).unwrap());
++        let mut original = HttpRequestBody::streaming_file(source.clone());
++        assert_eq!(
++            original
++                .frame()
++                .await
++                .unwrap()
++                .unwrap()
++                .into_data()
++                .unwrap(),
++            "3\r\nabc\r\n"
++        );
++        let replay = original.clone();
++        assert_eq!(replay.size_hint().exact(), Some(source.length() as u64));
++        let collected = replay.collect().await.unwrap().to_bytes();
++        assert!(collected.starts_with(b"3\r\nabc\r\n3\r\ndef\r\n0\r\n"));
++        assert_eq!(collected.len(), source.length());
++    }
++}
+--- a/src/client/http/file_stream.rs
++++ b/src/client/http/file_stream.rs
+@@ -0,0 +1,283 @@
++//! Private S3 streaming-upload source. A retry reconstructs the producer.
++
++use std::fs::{File, Metadata};
++use std::io;
++use std::sync::{Arc, Mutex};
++use std::time::SystemTime;
++
++use base64::Engine;
++use bytes::Bytes;
++use futures_util::stream::BoxStream;
++use futures_util::{stream, StreamExt};
++
++use crate::client::crypto::{crypto_provider, CryptoProvider, DigestAlgorithm, DigestContext};
++use crate::client::{HttpError, HttpErrorKind};
++
++/// A fixed, caller-owned file. The caller must not modify it during an upload/retry.
++#[derive(Debug)]
++pub(crate) struct StreamingFile {
++    file: Mutex<Option<Arc<File>>>,
++    length: u64,
++    modified: Option<SystemTime>,
++    chunk_size: usize,
++    crypto: Option<Arc<dyn CryptoProvider>>,
++    encoded_length: usize,
++}
++
++pub(crate) struct CancelStreamingFile(Arc<StreamingFile>);
++
++impl Drop for CancelStreamingFile {
++    fn drop(&mut self) {
++        self.0
++            .file
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .take();
++    }
++}
++
++struct State {
++    source: Arc<StreamingFile>,
++    offset: u64,
++    digest: Box<dyn DigestContext>,
++    complete: bool,
++}
++
++fn error(e: impl std::error::Error + Send + Sync + 'static) -> HttpError {
++    HttpError::new(HttpErrorKind::Unknown, e)
++}
++
++fn invalid(message: &'static str) -> HttpError {
++    error(io::Error::new(io::ErrorKind::InvalidData, message))
++}
++
++fn trailer(digest: &[u8]) -> Bytes {
++    Bytes::from(format!(
++        "0\r\nx-amz-checksum-sha256:{}\r\n\r\n",
++        base64::prelude::BASE64_STANDARD.encode(digest)
++    ))
++}
++
++fn encoded_length(length: u64, chunk_size: usize) -> usize {
++    let mut remaining = length as usize;
++    let mut encoded = trailer(&[0; 32]).len();
++    while remaining != 0 {
++        let size = remaining.min(chunk_size);
++        encoded += format!("{size:x}\r\n").len() + size + 2;
++        remaining -= size;
++    }
++    encoded
++}
++
++impl StreamingFile {
++    pub(crate) fn new(
++        file: File,
++        length: u64,
++        chunk_size: usize,
++        crypto: Option<Arc<dyn CryptoProvider>>,
++    ) -> io::Result<Self> {
++        if length > 32 * 1024 * 1024 || chunk_size == 0 || chunk_size > 1024 * 1024 {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "S3 streaming supports files <=32 MiB and chunks in 1..=1 MiB",
++            ));
++        }
++        let metadata = file.metadata()?;
++        if !metadata.is_file() || metadata.len() != length {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidInput,
++                "S3 streaming requires a regular file with the declared length",
++            ));
++        }
++        Ok(Self {
++            file: Mutex::new(Some(Arc::new(file))),
++            length,
++            modified: metadata.modified().ok(),
++            chunk_size,
++            crypto,
++            encoded_length: encoded_length(length, chunk_size),
++        })
++    }
++
++    pub(crate) fn length(&self) -> usize {
++        self.encoded_length
++    }
++
++    /// Own this guard for the whole upload, including every retry. A transport
++    /// may retain the stream after the request future is dropped; it must not
++    /// retain the source descriptor or start another read after cancellation.
++    pub(crate) fn cancel_on_drop(self: &Arc<Self>) -> CancelStreamingFile {
++        CancelStreamingFile(self.clone())
++    }
++
++    fn file_handle(&self) -> Result<Arc<File>, HttpError> {
++        self.file
++            .lock()
++            .map_err(|_| invalid("streaming file lock poisoned"))?
++            .as_ref()
++            .cloned()
++            .ok_or_else(|| {
++                error(io::Error::new(
++                    io::ErrorKind::Interrupted,
++                    "streaming upload cancelled",
++                ))
++            })
++    }
++
++    fn validate(&self, metadata: &Metadata) -> Result<(), HttpError> {
++        if metadata.len() != self.length || metadata.modified().ok() != self.modified {
++            return Err(invalid("source file changed during streaming upload"));
++        }
++        Ok(())
++    }
++
++    pub(crate) fn stream(self: &Arc<Self>) -> BoxStream<'static, Result<Bytes, HttpError>> {
++        let digest = match crypto_provider(self.crypto.as_deref())
++            .and_then(|provider| provider.digest(DigestAlgorithm::Sha256))
++        {
++            Ok(digest) => digest,
++            Err(e) => return stream::once(async { Err(error(e)) }).boxed(),
++        };
++        let state = State {
++            source: self.clone(),
++            offset: 0,
++            digest,
++            complete: false,
++        };
++        stream::try_unfold(state, |state| async move {
++            if state.complete {
++                return Ok(None);
++            }
++            tokio::task::spawn_blocking(move || {
++                let mut state = state;
++                let source = &state.source;
++                // The job owns only its current chunk's handle. Queued jobs
++                // acquire no handle if cancellation already closed the source.
++                let file = source.file_handle()?;
++                if state.offset == 0 || state.offset == source.length {
++                    source.validate(&file.metadata().map_err(error)?)?;
++                }
++                if state.offset == source.length {
++                    let chunk = trailer(state.digest.finish().map_err(error)?);
++                    state.complete = true;
++                    return Ok(Some((chunk, state)));
++                }
++                let size = (source.length - state.offset).min(source.chunk_size as u64) as usize;
++                let prefix = format!("{size:x}\r\n");
++                let start = prefix.len();
++                let mut chunk = Vec::with_capacity(start + size + 2);
++                chunk.extend_from_slice(prefix.as_bytes());
++                chunk.resize(start + size, 0);
++                let mut read = 0;
++                while read < size {
++                    let count = read_at(
++                        &file,
++                        &mut chunk[start + read..],
++                        state.offset + read as u64,
++                    )
++                    .map_err(error)?;
++                    if count == 0 {
++                        return Err(invalid("source file ended before declared length"));
++                    }
++                    read += count;
++                }
++                state.digest.update(&chunk[start..]);
++                chunk.extend_from_slice(b"\r\n");
++                state.offset += size as u64;
++                Ok(Some((Bytes::from(chunk), state)))
++            })
++            .await
++            .map_err(error)?
++        })
++        .boxed()
++    }
++}
++
++#[cfg(unix)]
++fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
++    std::os::unix::fs::FileExt::read_at(file, buffer, offset)
++}
++
++#[cfg(windows)]
++fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
++    std::os::windows::fs::FileExt::seek_read(file, buffer, offset)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use futures_util::TryStreamExt;
++    use std::io::Write;
++
++    #[tokio::test]
++    async fn checksum_framing_and_retry_restart_are_identical() {
++        let mut file = tempfile::tempfile().unwrap();
++        file.write_all(b"abcde").unwrap();
++        let source = Arc::new(StreamingFile::new(file, 5, 3, None).unwrap());
++        let mut partial = source.stream();
++        assert_eq!(partial.next().await.unwrap().unwrap(), "3\r\nabc\r\n");
++        drop(partial);
++        let chunks = source.stream().try_collect::<Vec<_>>().await.unwrap();
++        let wire = chunks.concat();
++        assert_eq!(wire.len(), source.length());
++        assert_eq!(wire, b"3\r\nabc\r\n2\r\nde\r\n0\r\nx-amz-checksum-sha256:NrvlDtloQdEEQ7y2cNZVTwo0t2G+Z+ycSorSwMRMpCw=\r\n\r\n");
++    }
++
++    #[tokio::test]
++    async fn empty_file_emits_sha256_trailer_and_replay() {
++        let source =
++            Arc::new(StreamingFile::new(tempfile::tempfile().unwrap(), 0, 1024, None).unwrap());
++        for _ in 0..2 {
++            let chunks = source.stream().try_collect::<Vec<_>>().await.unwrap();
++            assert_eq!(
++                chunks.concat(),
++                b"0\r\nx-amz-checksum-sha256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=\r\n\r\n"
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn cancellation_releases_file_while_transport_keeps_partial_stream() {
++        let mut file = tempfile::tempfile().unwrap();
++        file.write_all(b"abcde").unwrap();
++        let source = Arc::new(StreamingFile::new(file, 5, 3, None).unwrap());
++        let weak_file = Arc::downgrade(&source.file_handle().unwrap());
++        let guard = source.cancel_on_drop();
++        let mut stalled_transport = source.stream();
++        assert_eq!(
++            stalled_transport.next().await.unwrap().unwrap(),
++            "3\r\nabc\r\n"
++        );
++        assert!(weak_file.upgrade().is_some());
++
++        drop(guard);
++
++        // Keeping the stream/source alive must not keep the descriptor alive.
++        assert!(weak_file.upgrade().is_none());
++        assert!(stalled_transport.next().await.unwrap().is_err());
++        assert!(source.stream().next().await.unwrap().is_err());
++    }
++
++    #[tokio::test]
++    async fn cancelling_before_poll_closes_file_and_prevents_first_read() {
++        let mut file = tempfile::tempfile().unwrap();
++        file.write_all(b"abc").unwrap();
++        let source = Arc::new(StreamingFile::new(file, 3, 2, None).unwrap());
++        let weak_file = Arc::downgrade(&source.file_handle().unwrap());
++        let stream = source.stream();
++        drop(source.cancel_on_drop());
++
++        assert!(weak_file.upgrade().is_none());
++        assert!(stream.try_collect::<Vec<_>>().await.is_err());
++    }
++
++    #[tokio::test]
++    async fn changed_file_is_rejected_on_replay() {
++        let mut file = tempfile::tempfile().unwrap();
++        file.write_all(b"abc").unwrap();
++        let writer = file.try_clone().unwrap();
++        let source = Arc::new(StreamingFile::new(file, 3, 2, None).unwrap());
++        writer.set_len(1).unwrap();
++        assert!(source.stream().try_collect::<Vec<_>>().await.is_err());
++    }
++}
+--- a/src/client/http/mod.rs
++++ b/src/client/http/mod.rs
+@@ -17,6 +17,11 @@
+ 
+ //! HTTP client abstraction
+ 
++#[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++mod file_stream;
++#[cfg(all(feature = "aws-base", not(target_arch = "wasm32")))]
++pub(crate) use file_stream::StreamingFile;
++
+ mod body;
+ pub use body::*;
+ 

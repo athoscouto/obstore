@@ -54,3 +54,5 @@ jobs:
         run: |
           cargo test --all
           cargo test --all --all-features
+          cargo test --manifest-path vendor/object_store-0.14.2/Cargo.toml --locked --features aws client::http::
+          cargo test --manifest-path vendor/object_store-0.14.2/Cargo.toml --locked --features aws aws::tests::file_stream_capability

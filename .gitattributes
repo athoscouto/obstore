@@ -1,0 +1,3 @@
+# Keep third-party sources separate from the focused patch during review.
+vendor/object_store-0.14.2/** linguist-vendored -whitespace
+vendor/*.patch linguist-generated -whitespace

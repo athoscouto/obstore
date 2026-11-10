@@ -7,7 +7,7 @@ members = ["obstore"]
 #
 # But pyo3-object_store gets published to crates.io, which can't have git
 # dependencies.
-exclude = ["pyo3-object_store", "pyo3-bytes"]
+exclude = ["pyo3-object_store", "pyo3-bytes", "vendor/object_store-0.14.2"]
 resolver = "2"
 
 [workspace.package]
@@ -38,6 +38,9 @@ pyo3-file = { git = "https://github.com/kylebarron/pyo3-file", rev = "8ec53a9202
 thiserror = "2"
 tokio = "1.50"
 url = "2"
+
+[patch.crates-io]
+object_store = { path = "vendor/object_store-0.14.2" }
 
 [profile.release]
 lto = true

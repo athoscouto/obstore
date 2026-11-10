@@ -8,6 +8,9 @@ default_language_version:
 # Optionally both commit and push
 default_stages: [pre-commit]
 
+# Preserve checksum-verified upstream sources and the reproducible unified patch.
+exclude: ^vendor/
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
