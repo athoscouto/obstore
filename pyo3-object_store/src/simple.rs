@@ -21,6 +21,7 @@ use crate::{
 // as an AWS config before knowing that the URL scheme is AWS.
 #[pyfunction]
 #[pyo3(signature = (url, *, config=None, client_options=None, retry_config=None, credential_provider=None, literal_prefix=false, **kwargs))]
+#[allow(clippy::too_many_arguments)]
 pub fn from_url<'py>(
     py: Python<'py>,
     url: PyUrl,

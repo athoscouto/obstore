@@ -93,6 +93,7 @@ impl PyS3Store {
     // Create from parameters
     #[new]
     #[pyo3(signature = (bucket=None, *, prefix=None, literal_prefix=false, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         bucket: Option<String>,
         prefix: Option<PyPath>,
@@ -149,6 +150,7 @@ impl PyS3Store {
 
     #[classmethod]
     #[pyo3(signature = (url, *, literal_prefix=false, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_url<'py>(
         cls: &Bound<'py, PyType>,
         url: PyUrl,
