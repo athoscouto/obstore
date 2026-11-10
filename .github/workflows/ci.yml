@@ -37,7 +37,8 @@ jobs:
 
       - name: Cargo fmt
         run: |
-          cargo fmt --all -- --check
+          # Preserve the vendored upstream crate; format repository-owned code.
+          cargo fmt --package obstore -- --check
           cd pyo3-object_store && cargo fmt --all -- --check && cd ..
           cd pyo3-bytes && cargo fmt --all -- --check && cd ..
 
