@@ -51,7 +51,7 @@ impl<'py> FromPyObject<'_, 'py> for PyAttributeValue {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PyAttributes(Attributes);
 
 impl PyAttributes {

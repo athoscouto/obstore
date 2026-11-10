@@ -194,8 +194,15 @@ async def put_async(
     undo an upload that the server has already completed.
 
     Local `Path` inputs are opened asynchronously. Errors opening the file are
-    raised when awaiting this operation. Keep the source file available until
-    the upload finishes.
+    raised when awaiting this operation. Keep the source file available and
+    unchanged until the upload finishes, including retries.
+
+    On ordinary authenticated HTTPS AWS S3, eligible single-part overwrite uploads
+    of regular files up to 32 MiB use bounded 1 MiB reads and a SHA256 checksum
+    trailer. SigV4 authenticates the request headers; TLS and the checksum protect
+    the unsigned streaming payload. Other inputs/configurations retain their
+    existing upload path. `chunk_size` still controls multipart parts, independently
+    of the internal file-read size.
 
     This means, for example, you can pass the result of `get_async` directly to
     `put_async`, and the request will be streamed through Python during the put

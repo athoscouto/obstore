@@ -56,7 +56,7 @@ impl<T: ObjectStore> MaybePrefixedStore<T> {
     }
 
     /// Create the full path from a path relative to prefix
-    fn full_path<'a>(&'a self, location: &'a Path) -> Cow<'a, Path> {
+    pub fn full_path<'a>(&'a self, location: &'a Path) -> Cow<'a, Path> {
         if let Some(prefix) = &self.prefix {
             Cow::Owned(prefix.parts().chain(location.parts()).collect())
         } else {

@@ -4,6 +4,7 @@ use object_store::TagSet;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 
+#[derive(Clone)]
 pub(crate) struct PyTagSet(TagSet);
 
 impl PyTagSet {

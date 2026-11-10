@@ -22,13 +22,16 @@ use pyo3::{intern, IntoPyObjectExt};
 use pyo3_async_runtimes::tokio::get_runtime;
 use pyo3_bytes::PyBytes;
 use pyo3_file::PyFileLikeObject;
-use pyo3_object_store::{PyObjectStore, PyObjectStoreError, PyObjectStoreResult, PyPath};
+use pyo3_object_store::{
+    PyObjectStore, PyObjectStoreError, PyObjectStoreResult, PyPath, PyS3Store,
+};
 use tokio::io::AsyncReadExt;
 
 use crate::attributes::PyAttributes;
 use crate::multipart::AbortOnDrop;
 use crate::tags::PyTagSet;
 
+#[derive(Clone)]
 pub(crate) struct PyPutMode(PutMode);
 
 impl<'py> FromPyObject<'_, 'py> for PyPutMode {
@@ -223,6 +226,7 @@ pub(crate) enum PutInput {
 pub(crate) struct AsyncFile {
     file: tokio::fs::File,
     path: PathBuf,
+    regular_length: Option<u64>,
 }
 
 impl PutInput {
@@ -388,9 +392,9 @@ pub(crate) fn put(
 #[pyfunction]
 #[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn put_async(
-    py: Python,
-    store: PyObjectStore,
+pub(crate) fn put_async<'py>(
+    py: Python<'py>,
+    store: Bound<'py, PyAny>,
     path: PyPath,
     mut file: PutInput,
     attributes: Option<PyAttributes>,
@@ -400,7 +404,12 @@ pub(crate) fn put_async(
     chunk_size: NonZeroUsize,
     multipart_threshold: Option<NonZeroUsize>,
     max_concurrency: usize,
-) -> PyResult<Bound<PyAny>> {
+) -> PyResult<Bound<'py, PyAny>> {
+    // Preserve the generic store route while retaining a typed S3 handle for the
+    // narrowly eligible native file-stream path.
+    let s3_store = store.extract::<PyS3Store>().ok();
+    let store = store.extract::<PyObjectStore>()?;
+    let s3_store = s3_store.map(PyS3Store::into_inner);
     let multipart_threshold = multipart_threshold.unwrap_or(chunk_size);
     // Path input is the one source whose mode inference must be deferred until it is opened.
     // Preserve the existing call-time preflight behavior for all other input types.
@@ -415,12 +424,11 @@ pub(crate) fn put_async(
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let (file, mut use_multipart) = match file {
-            PutInput::Path(path) => {
-                let infer_multipart = use_multipart.is_none();
+            PutInput::Path(source_path) => {
                 let (file, inferred_multipart) =
-                    open_path_async(path, multipart_threshold, infer_multipart).await?;
-                let use_multipart = use_multipart.or(inferred_multipart).unwrap_or(false);
-                (file, use_multipart)
+                    open_path_async(source_path, multipart_threshold, use_multipart.is_none())
+                        .await?;
+                (file, use_multipart.or(inferred_multipart).unwrap_or(false))
             }
             file => (
                 file,
@@ -432,6 +440,34 @@ pub(crate) fn put_async(
         if let Some(mode) = &mode {
             if !matches!(mode.0, PutMode::Overwrite) {
                 use_multipart = false;
+            }
+        }
+
+        // Select the streaming path before any request. Once started, its errors
+        // propagate; retrying through the buffered path could repeat a remote write.
+        if !use_multipart {
+            if let (Some(s3_store), PutInput::AsyncFile(source)) = (s3_store.as_ref(), &file) {
+                if let Some(length) = source.regular_length {
+                    let opts = make_put_options(attributes.clone(), tags.clone(), mode.clone());
+                    if s3_store.inner().supports_file_stream(&opts, length) {
+                        let PutInput::AsyncFile(source) = file else {
+                            unreachable!()
+                        };
+                        let location = s3_store.full_path(path.as_ref());
+                        let result = s3_store
+                            .inner()
+                            .put_file_stream_opts(
+                                &location,
+                                source.file.into_std().await,
+                                length,
+                                1024 * 1024,
+                                opts,
+                            )
+                            .await
+                            .map_err(PyObjectStoreError::from)?;
+                        return Ok(PyPutResult(result));
+                    }
+                }
             }
         }
 
@@ -461,6 +497,24 @@ pub(crate) fn put_async(
     })
 }
 
+fn make_put_options(
+    attributes: Option<PyAttributes>,
+    tags: Option<PyTagSet>,
+    mode: Option<PyPutMode>,
+) -> PutOptions {
+    let mut opts = PutOptions::default();
+    if let Some(attributes) = attributes {
+        opts.attributes = attributes.into_inner();
+    }
+    if let Some(tags) = tags {
+        opts.tags = tags.into_inner();
+    }
+    if let Some(mode) = mode {
+        opts.mode = mode.0;
+    }
+    opts
+}
+
 impl PutInput {
     fn open_path_sync(self) -> PyResult<Self> {
         match self {
@@ -480,6 +534,8 @@ async fn open_path_async(
     let error_path = path.clone();
     let opened = tokio::task::spawn_blocking(move || {
         let mut file = File::open(path)?;
+        let metadata = file.metadata()?;
+        let regular_length = metadata.is_file().then_some(metadata.len());
         let inferred_multipart = if infer_multipart {
             let origin_pos = file.stream_position()?;
             let size = file.seek(SeekFrom::End(0))?;
@@ -488,7 +544,7 @@ async fn open_path_async(
         } else {
             None
         };
-        Ok::<_, std::io::Error>((file, inferred_multipart))
+        Ok::<_, std::io::Error>((file, inferred_multipart, regular_length))
     })
     .await
     .map_err(|error| {
@@ -497,11 +553,13 @@ async fn open_path_async(
         )))
     })?;
 
-    let (file, inferred_multipart) = opened.map_err(|error| path_io_error(&error_path, error))?;
+    let (file, inferred_multipart, regular_length) =
+        opened.map_err(|error| path_io_error(&error_path, error))?;
     Ok((
         PutInput::AsyncFile(AsyncFile {
             file: tokio::fs::File::from_std(file),
             path: error_path,
+            regular_length,
         }),
         inferred_multipart,
     ))
@@ -527,17 +585,7 @@ async fn put_inner(
     tags: Option<PyTagSet>,
     mode: Option<PyPutMode>,
 ) -> PyObjectStoreResult<PyPutResult> {
-    let mut opts = PutOptions::default();
-
-    if let Some(attributes) = attributes {
-        opts.attributes = attributes.into_inner();
-    }
-    if let Some(tags) = tags {
-        opts.tags = tags.into_inner();
-    }
-    if let Some(mode) = mode {
-        opts.mode = mode.0;
-    }
+    let opts = make_put_options(attributes, tags, mode);
 
     let payload = reader.read_all().await?;
     Ok(PyPutResult(store.put_opts(path, payload, opts).await?))
