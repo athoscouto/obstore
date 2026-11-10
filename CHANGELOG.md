@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.1+athos.3
+
+- Async native Path uploads to ordinary authenticated HTTPS AWS S3 now stream
+  eligible single-part overwrite requests up to 32 MiB with 1 MiB reads and an incremental
+  SHA256 checksum trailer, instead of buffering the entire file before sending.
+  The request uses SigV4 authentication and TLS; payload chunks are not individually
+  signed (the SDK-style unsigned payload with a validated checksum trailer).
+- Existing `put_async` arguments, multipart thresholds, part sizes and concurrency
+  are unchanged. Conditional writes, other providers/endpoints, incompatible
+  configurations and files above the streaming limit retain the existing path.
+- Retries replay from the same open file descriptor; cancellation releases source
+  handles and prevents subsequent reads. Source files must remain unchanged until
+  upload completion, including retries.
+- Includes the signing, literal-prefix listing and multipart cancellation fixes
+  from `0.12.1+athos.2`.
+
 ## Unreleased
 
 ## [0.12.1] - 2026-10-27
