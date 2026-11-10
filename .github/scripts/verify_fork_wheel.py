@@ -22,7 +22,9 @@ async def main() -> None:
     """Exercise the installed fork's upload, listing-config and signing APIs."""
     # Exercise the installed binary through public put_async, with a loopback TLS
     # tunnel keeping the ordinary AWS hostname and certificate verification.
-    await runpy.run_path(str(STREAM_RECEIVER))["run_smoke"]()
+    await runpy.run_path(str(STREAM_RECEIVER))["run_smoke"](
+        large_size=33 * 1024 * 1024 + 1
+    )
     store = S3Store(
         "smoke-bucket",
         prefix="scope",

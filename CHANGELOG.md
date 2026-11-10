@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.1+athos.4
+
+- Remove the 32 MiB cap from eligible single-part S3 Path streaming. Explicit
+  `use_multipart=False` and automatically selected single-part uploads use the
+  same bounded streaming path, regardless of file size. Existing multipart
+  selection and public arguments are unchanged.
+- Calculate encoded request lengths in constant time with checked arithmetic.
+
 ## 0.12.1+athos.3
 
 - Async native Path uploads to ordinary authenticated HTTPS AWS S3 now stream
@@ -17,11 +25,6 @@
   from `0.12.1+athos.2`.
 
 ## Unreleased
-
-- Remove the 32 MiB cap from eligible single-part S3 Path streaming. Explicit
-  `use_multipart=False` and automatically selected single-part uploads use the
-  same bounded streaming path, regardless of file size. Existing multipart
-  selection and public arguments are unchanged.
 
 ## [0.12.1] - 2026-10-27
 
