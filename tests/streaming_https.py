@@ -305,7 +305,7 @@ def _assert_buffered(receiver: _Receiver, payload: bytes, *, conditional: bool) 
         raise AssertionError("conditional write lost its precondition")
 
 
-async def run_smoke() -> None:
+async def run_smoke(*, large_size: int | None = None) -> None:
     """Exercise public Path streaming against an ordinary AWS HTTPS endpoint."""
     import obstore
     from obstore.store import S3Store
@@ -392,6 +392,35 @@ async def run_smoke() -> None:
                     timeout=60,
                 )
                 _assert_buffered(receiver, payload, conditional=mode == "create")
+            if large_size is not None:
+                large_payload = b"x" * large_size
+                source.write_bytes(large_payload)
+                for index, force_single_part in enumerate((False, None)):
+                    await asyncio.wait_for(
+                        obstore.put_async(
+                            store,
+                            f"streamed-large-{index}.bin",
+                            source,
+                            use_multipart=force_single_part,
+                            multipart_threshold=large_size + 1
+                            if force_single_part is None
+                            else None,
+                            attributes={"Content-Encoding": "identity"},
+                        ),
+                        timeout=120,
+                    )
+                    if receiver.payloads[-1] != large_payload:
+                        raise AssertionError(
+                            "large single-part upload changed source bytes",
+                        )
+                    request, headers = receiver.requests[-1]
+                    _assert_request(
+                        request,
+                        headers,
+                        receiver.trailers[-1],
+                        (large_payload, b"identity,aws-chunked"),
+                        include_metadata=False,
+                    )
         finally:
             receiver.shutdown()
             receiver.server_close()

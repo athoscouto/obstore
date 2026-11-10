@@ -198,9 +198,10 @@ async def put_async(
     unchanged until the upload finishes, including retries.
 
     On ordinary authenticated HTTPS AWS S3, eligible single-part overwrite uploads
-    of regular files up to 32 MiB use bounded 1 MiB reads and a SHA256 checksum
-    trailer. SigV4 authenticates the request headers; TLS and the checksum protect
-    the unsigned streaming payload. Other inputs/configurations retain their
+    of regular files use bounded 1 MiB reads and a SHA256 checksum trailer.
+    This also applies to files above the multipart threshold when
+    `use_multipart=False` is passed. SigV4 authenticates the request headers; TLS
+    and the checksum protect the unsigned streaming payload. Other inputs/configurations retain their
     existing upload path. `chunk_size` still controls multipart parts, independently
     of the internal file-read size.
 

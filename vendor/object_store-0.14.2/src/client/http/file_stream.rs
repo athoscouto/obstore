@@ -58,15 +58,27 @@ fn trailer(digest: &[u8]) -> Bytes {
     ))
 }
 
-fn encoded_length(length: u64, chunk_size: usize) -> usize {
-    let mut remaining = length as usize;
-    let mut encoded = trailer(&[0; 32]).len();
-    while remaining != 0 {
-        let size = remaining.min(chunk_size);
-        encoded += format!("{size:x}\r\n").len() + size + 2;
-        remaining -= size;
-    }
-    encoded
+fn encoded_length(length: u64, chunk_size: usize) -> io::Result<usize> {
+    let encoded = usize::try_from(length).ok().and_then(|length| {
+        let full_chunks = length / chunk_size;
+        let remaining = length % chunk_size;
+        let full_frame = chunk_size + format!("{chunk_size:x}").len() + 4;
+        let last_frame = if remaining == 0 {
+            0
+        } else {
+            remaining + format!("{remaining:x}").len() + 4
+        };
+        full_chunks
+            .checked_mul(full_frame)
+            .and_then(|total| total.checked_add(last_frame))
+            .and_then(|total| total.checked_add(trailer(&[0; 32]).len()))
+    });
+    encoded.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "encoded upload length exceeds platform size",
+        )
+    })
 }
 
 impl StreamingFile {
@@ -76,10 +88,10 @@ impl StreamingFile {
         chunk_size: usize,
         crypto: Option<Arc<dyn CryptoProvider>>,
     ) -> io::Result<Self> {
-        if length > 32 * 1024 * 1024 || chunk_size == 0 || chunk_size > 1024 * 1024 {
+        if chunk_size == 0 || chunk_size > 1024 * 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "S3 streaming supports files <=32 MiB and chunks in 1..=1 MiB",
+                "S3 streaming supports chunks in 1..=1 MiB",
             ));
         }
         let metadata = file.metadata()?;
@@ -95,7 +107,7 @@ impl StreamingFile {
             modified: metadata.modified().ok(),
             chunk_size,
             crypto,
-            encoded_length: encoded_length(length, chunk_size),
+            encoded_length: encoded_length(length, chunk_size)?,
         })
     }
 
@@ -208,6 +220,30 @@ mod tests {
     use super::*;
     use futures_util::TryStreamExt;
     use std::io::Write;
+
+    #[test]
+    fn encoded_length_rejects_overflow() {
+        assert!(encoded_length(u64::MAX, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn files_above_32_mib_keep_bounded_frames() {
+        let file = tempfile::tempfile().unwrap();
+        let length = 33 * 1024 * 1024;
+        file.set_len(length).unwrap();
+        let source = Arc::new(StreamingFile::new(file, length, 1024 * 1024, None).unwrap());
+        let mut stream = source.stream();
+        let mut total = 0;
+        let mut frames = 0;
+        while let Some(frame) = stream.next().await {
+            let frame = frame.unwrap();
+            assert!(frame.len() <= 1024 * 1024 + 10);
+            total += frame.len();
+            frames += 1;
+        }
+        assert_eq!(frames, 34); // 33 data frames and the SHA256 trailer.
+        assert_eq!(total, source.length());
+    }
 
     #[tokio::test]
     async fn checksum_framing_and_retry_restart_are_identical() {

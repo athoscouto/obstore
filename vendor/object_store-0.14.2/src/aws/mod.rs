@@ -118,7 +118,7 @@ impl AmazonS3 {
             || host.ends_with(".amazonaws.com.cn");
         let no_explicit_encryption = self.client.config.encryption_headers.0.is_empty();
         matches!(opts.mode, PutMode::Overwrite)
-            && length <= 32 * 1024 * 1024
+            && usize::try_from(length).is_ok()
             && endpoint.scheme() == "https"
             && aws_host
             && !host.contains("s3express-")
@@ -886,7 +886,8 @@ mod tests {
         ] {
             let store = streaming_capability_store(endpoint);
             assert!(store.supports_file_stream(&opts, 32 * 1024 * 1024));
-            assert!(!store.supports_file_stream(&opts, 32 * 1024 * 1024 + 1));
+            assert!(store.supports_file_stream(&opts, 32 * 1024 * 1024 + 1));
+            assert!(store.supports_file_stream(&opts, 300 * 1024 * 1024));
         }
 
         for endpoint in [
