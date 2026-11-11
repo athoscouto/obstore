@@ -20,7 +20,7 @@ use crate::{
 // AWS/Azure/Google config keys could overlap. And so we don't want to accidentally parse a config
 // as an AWS config before knowing that the URL scheme is AWS.
 #[pyfunction]
-#[pyo3(signature = (url, *, config=None, client_options=None, retry_config=None, credential_provider=None, literal_prefix=false, **kwargs))]
+#[pyo3(signature = (url, *, config=None, client_options=None, retry_config=None, credential_provider=None, literal_prefix=false, request_metrics=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 pub fn from_url<'py>(
     py: Python<'py>,
@@ -30,9 +30,15 @@ pub fn from_url<'py>(
     retry_config: Option<PyRetryConfig>,
     credential_provider: Option<Bound<'py, PyAny>>,
     literal_prefix: bool,
+    request_metrics: Option<crate::PyS3RequestMetrics>,
     kwargs: Option<Bound<'py, PyAny>>,
 ) -> PyObjectStoreResult<Bound<'py, PyAny>> {
     let (scheme, _) = ObjectStoreScheme::parse(url.as_ref()).map_err(object_store::Error::from)?;
+    if request_metrics.is_some() && scheme != ObjectStoreScheme::AmazonS3 {
+        return Err(
+            PyValueError::new_err("request_metrics is only supported for S3 stores").into(),
+        );
+    }
     if literal_prefix && scheme != ObjectStoreScheme::AmazonS3 {
         return Err(PyValueError::new_err("literal_prefix is only supported for S3 stores").into());
     }
@@ -41,6 +47,7 @@ pub fn from_url<'py>(
             &PyType::new::<PyS3Store>(py),
             url,
             literal_prefix,
+            request_metrics,
             config.map(|x| x.extract()).transpose()?,
             client_options,
             retry_config,

@@ -6,6 +6,7 @@ from typing import Any, Self, TypeAlias, Unpack, overload
 from ._aws import S3Config as S3Config
 from ._aws import S3Credential as S3Credential
 from ._aws import S3CredentialProvider as S3CredentialProvider
+from ._aws import S3RequestMetrics as S3RequestMetrics
 from ._aws import S3Store as S3Store
 from ._azure import AzureAccessKey as AzureAccessKey
 from ._azure import AzureBearerToken as AzureBearerToken
@@ -32,6 +33,7 @@ def from_url(
     retry_config: RetryConfig | None = None,
     credential_provider: S3CredentialProvider | None = None,
     literal_prefix: bool = False,
+    request_metrics: S3RequestMetrics | None = None,
     **kwargs: Unpack[S3Config],
 ) -> ObjectStore: ...
 @overload
