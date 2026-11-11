@@ -1,7 +1,10 @@
 # ruff: noqa: PGH003
 
+import asyncio
 import pickle
 import threading
+from collections import UserDict
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -9,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from obstore.exceptions import BaseError, UnauthenticatedError
-from obstore.store import S3Store, from_url
+from obstore.store import MemoryStore, S3Store, from_url
 
 
 @pytest.mark.parametrize(
@@ -105,6 +108,118 @@ def test_literal_prefix_list_propagates_s3_errors():
         server.shutdown()
         thread.join()
         server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected_headers"),
+    [
+        (None, {}),
+        (
+            {},
+            {
+                "x-amz-metadata-directive": "REPLACE",
+            },
+        ),
+        (
+            {"Custom-Key": "value", "content-type": "application/json"},
+            {
+                "x-amz-metadata-directive": "REPLACE",
+                "x-amz-meta-custom-key": "value",
+                "x-amz-meta-content-type": "application/json",
+            },
+        ),
+        (
+            UserDict({"Custom-Key": "value"}),
+            {"x-amz-metadata-directive": "REPLACE", "x-amz-meta-custom-key": "value"},
+        ),
+    ],
+)
+@pytest.mark.parametrize("async_mode", ["sync", "async"])
+def test_copy_metadata_headers(
+    metadata: Mapping[str, str] | None,
+    expected_headers: dict[str, str],
+    async_mode: str,
+):
+    requests: list[dict[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_PUT(self):
+            requests.append(
+                {
+                    "_path": self.path,
+                    **{key.lower(): value for key, value in self.headers.items()},
+                },
+            )
+            body = b'<CopyObjectResult><ETag>"etag"</ETag></CopyObjectResult>'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        store = S3Store(
+            "bucket",
+            endpoint=f"http://127.0.0.1:{server.server_port}",
+            region="us-east-1",
+            skip_signature=True,
+            client_options={"allow_http": True},
+            virtual_hosted_style_request=False,
+            prefix="pref",
+        )
+        if async_mode == "async":
+            asyncio.run(store.copy_async("source", "destination", metadata=metadata))
+        else:
+            store.copy("source", "destination", metadata=metadata)
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert len(requests) == 1
+    assert requests[0]["_path"] == "/bucket/pref/destination"
+    assert requests[0]["x-amz-copy-source"] == "bucket/pref/source"
+    assert requests[0].get("x-amz-metadata-directive") == (
+        None if metadata is None else "REPLACE"
+    )
+    assert requests[0].get("x-amz-tagging-directive") is None
+    assert {
+        name: requests[0].get(name) for name in expected_headers
+    } == expected_headers
+
+
+def test_copy_metadata_is_rejected_without_mutation():
+    store = MemoryStore()
+    store.put("source", b"source")
+    with pytest.raises(NotImplementedError):
+        store.copy("source", "destination", metadata={"key": "value"})
+    with pytest.raises(NotImplementedError):
+        asyncio.run(store.copy_async("source", "destination", metadata={}))
+    assert [item["path"] for item in store.list().collect()] == ["source"]
+    with pytest.raises(NotImplementedError):
+        store.copy("source", "destination", overwrite=False, metadata={})
+    with pytest.raises(NotImplementedError):
+        asyncio.run(
+            store.copy_async("source", "destination", overwrite=False, metadata={}),
+        )
+    assert [item["path"] for item in store.list().collect()] == ["source"]
+
+    s3 = S3Store(
+        "bucket",
+        endpoint="http://127.0.0.1:1",
+        region="us-east-1",
+        skip_signature=True,
+        client_options={"allow_http": True},
+    )
+    for invalid_metadata in ({"bad key": "value"}, {"key": "bad\r\nvalue"}):
+        with pytest.raises(BaseError, match="header"):
+            s3.copy("source", "destination", metadata=invalid_metadata)
 
 
 @pytest.mark.parametrize("prefix", [None, ""])

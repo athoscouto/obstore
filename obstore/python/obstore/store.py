@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         AsyncIterator,
         Iterable,
         Iterator,
+        Mapping,
         Sequence,
     )
     from pathlib import Path
@@ -107,7 +108,14 @@ class ObjectStoreMethods:
         [obspec](https://developmentseed.org/obspec/) instead.
     """
 
-    def copy(self, from_: str, to: str, *, overwrite: bool = True) -> None:
+    def copy(
+        self,
+        from_: str,
+        to: str,
+        *,
+        overwrite: bool = True,
+        metadata: Mapping[str, str] | None = None,
+    ) -> None:
         """Copy an object from one path to another in the same object store.
 
         Refer to the documentation for [copy][obstore.copy].
@@ -117,6 +125,7 @@ class ObjectStoreMethods:
             from_,
             to,
             overwrite=overwrite,
+            metadata=metadata,
         )
 
     async def copy_async(
@@ -125,6 +134,7 @@ class ObjectStoreMethods:
         to: str,
         *,
         overwrite: bool = True,
+        metadata: Mapping[str, str] | None = None,
     ) -> None:
         """Call `copy` asynchronously.
 
@@ -135,6 +145,7 @@ class ObjectStoreMethods:
             from_,
             to,
             overwrite=overwrite,
+            metadata=metadata,
         )
 
     def delete(self, paths: str | Sequence[str]) -> None:

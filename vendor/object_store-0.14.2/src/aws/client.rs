@@ -672,7 +672,12 @@ impl S3Client {
     }
 
     /// Make an S3 Copy request <https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html>
-    pub(crate) fn copy_request<'a>(&'a self, from: &Path, to: &'a Path) -> Request<'a> {
+    pub(crate) fn copy_request<'a>(
+        &'a self,
+        from: &Path,
+        to: &'a Path,
+        metadata: Option<&super::S3CopyMetadata>,
+    ) -> Result<Request<'a>> {
         let source = format!("{}/{}", self.config.bucket, encode_path(from));
 
         let mut copy_source_encryption_headers = HeaderMap::new();
@@ -710,13 +715,39 @@ impl S3Client {
             );
         }
 
-        self.request(Method::PUT, to)
+        let mut request = self
+            .request(Method::PUT, to)
             .idempotent(true)
             .retry_error_body(true)
             .header(&COPY_SOURCE_HEADER, &source)
             .headers(self.config.encryption_headers.clone().into())
             .headers(copy_source_encryption_headers)
-            .with_session_creds(false)
+            .with_session_creds(false);
+        if let Some(metadata) = metadata {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-amz-metadata-directive",
+                http::HeaderValue::from_static("REPLACE"),
+            );
+            for (name, value) in &metadata.0 {
+                let name = format!("x-amz-meta-{name}");
+                let name = HeaderName::from_bytes(name.as_bytes()).map_err(|source| {
+                    crate::Error::Generic {
+                        store: STORE,
+                        source: Box::new(source),
+                    }
+                })?;
+                let value = http::HeaderValue::from_str(value).map_err(|source| {
+                    crate::Error::Generic {
+                        store: STORE,
+                        source: Box::new(source),
+                    }
+                })?;
+                headers.insert(name, value);
+            }
+            request = request.headers(headers);
+        }
+        Ok(request)
     }
 
     pub(crate) async fn create_multipart(

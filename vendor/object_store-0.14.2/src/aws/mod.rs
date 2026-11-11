@@ -36,7 +36,7 @@ use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 use http::header::{HeaderName, IF_MATCH, IF_NONE_MATCH};
 use http::{Method, StatusCode};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use url::Url;
 
 use crate::aws::client::{CompleteMultipartMode, PutPartPayload, RequestError, S3Client};
@@ -68,6 +68,10 @@ mod resolve;
 pub use builder::{AmazonS3Builder, AmazonS3ConfigKey};
 pub use checksum::Checksum;
 pub use precondition::{S3ConditionalPut, S3CopyIfNotExists};
+
+/// Replacement user metadata for an S3 CopyObject request.
+#[derive(Debug, Clone)]
+pub struct S3CopyMetadata(pub HashMap<String, String>);
 
 #[cfg(all(feature = "reqwest", not(target_arch = "wasm32")))]
 pub use resolve::resolve_bucket_region;
@@ -504,19 +508,25 @@ impl ObjectStore for AmazonS3 {
     async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
         let CopyOptions {
             mode,
-            extensions: _,
+            extensions,
         } = options;
 
         match mode {
             CopyMode::Overwrite => {
                 self.client
-                    .copy_request(from, to)
+                    .copy_request(from, to, extensions.get::<S3CopyMetadata>())?
                     .idempotent(true)
                     .send()
                     .await?;
                 Ok(())
             }
             CopyMode::Create => {
+                if extensions.get::<S3CopyMetadata>().is_some() {
+                    return Err(Error::NotSupported {
+                        source: "S3 metadata replacement is not supported with copy-if-not-exists"
+                            .into(),
+                    });
+                }
                 let (k, v, status) = match &self.client.config.copy_if_not_exists {
                     Some(S3CopyIfNotExists::Header(k, v)) => {
                         (k, v, StatusCode::PRECONDITION_FAILED)
@@ -570,7 +580,7 @@ impl ObjectStore for AmazonS3 {
                     }
                 };
 
-                let req = self.client.copy_request(from, to);
+                let req = self.client.copy_request(from, to, None)?;
                 match req.header(k, v).send().await {
                     Err(RequestError::Retry { source, path })
                         if source.status() == Some(status) =>
