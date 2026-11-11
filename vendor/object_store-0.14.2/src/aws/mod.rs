@@ -61,12 +61,14 @@ mod checksum;
 mod client;
 mod credential;
 mod precondition;
+mod request_metrics;
 
 #[cfg(all(feature = "reqwest", not(target_arch = "wasm32")))]
 mod resolve;
 
 pub use builder::{AmazonS3Builder, AmazonS3ConfigKey};
 pub use checksum::Checksum;
+pub use request_metrics::S3RequestMetrics;
 pub use precondition::{S3ConditionalPut, S3CopyIfNotExists};
 
 /// Replacement user metadata for an S3 CopyObject request.

@@ -195,6 +195,7 @@ pub struct AmazonS3Builder {
     request_payer: ConfigValue<RequesterPayer>,
     /// The [`HttpConnector`] to use
     http_connector: Option<Arc<dyn HttpConnector>>,
+    request_metrics: Option<Arc<super::S3RequestMetrics>>,
 }
 
 /// Configuration keys for [`AmazonS3Builder`]
@@ -1143,6 +1144,15 @@ impl AmazonS3Builder {
         self
     }
 
+    /// Count S3 data-client HTTP attempts using this shared cumulative handle.
+    ///
+    /// Credential-provider requests are excluded. No wrapper is installed unless
+    /// this method is called; stores cloned from this builder share the handle.
+    pub fn with_request_metrics(mut self, metrics: Arc<super::S3RequestMetrics>) -> Self {
+        self.request_metrics = Some(metrics);
+        self
+    }
+
     /// The [`HttpConnector`] to use
     ///
     /// On non-WASM32 platforms uses [`reqwest`] by default, on WASM32 platforms must be provided
@@ -1332,6 +1342,10 @@ impl AmazonS3Builder {
         };
 
         let http_client = http.connect(&config.client_options)?;
+        let http_client = match self.request_metrics {
+            Some(metrics) => metrics.wrap(http_client),
+            None => http_client,
+        };
         let client = Arc::new(S3Client::new(config, http_client));
 
         Ok(AmazonS3 { client })
