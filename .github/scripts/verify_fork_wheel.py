@@ -7,15 +7,68 @@ import pickle
 import runpy
 import tomllib
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Thread
 from urllib.parse import parse_qs, urlsplit
 
 import obstore
 from obstore.store import MemoryStore, S3Store
 
 STREAM_RECEIVER = Path(__file__).resolve().parents[2] / "tests" / "streaming_https.py"
+
+
+async def verify_copy_metadata() -> None:
+    """Verify the new copy binding and request headers on every wheel platform."""
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_PUT(self) -> None:
+            requests.append((self.path, dict(self.headers.items())))
+            body = b'<CopyObjectResult><ETag>"copy-smoke"</ETag></CopyObjectResult>'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        store = S3Store(
+            "copy-smoke",
+            prefix="scope",
+            region="us-east-1",
+            endpoint=f"http://127.0.0.1:{server.server_port}",
+            skip_signature=True,
+            virtual_hosted_style_request=False,
+            client_options={"allow_http": True},
+        )
+        cases = (None, {}, {"content-type": "custom", "origin": "wheel-smoke"})
+        for metadata in cases:
+            await store.copy_async("source", "destination", metadata=metadata)
+            path, headers = requests[-1]
+            headers = {key.lower(): value for key, value in headers.items()}
+            assert path == "/copy-smoke/scope/destination"
+            assert headers["x-amz-copy-source"] == "copy-smoke/scope/source"
+            assert headers.get("x-amz-metadata-directive") == (
+                None if metadata is None else "REPLACE"
+            )
+            assert {
+                key.removeprefix("x-amz-meta-"): value
+                for key, value in headers.items()
+                if key.startswith("x-amz-meta-")
+            } == (metadata or {})
+        assert len(requests) == len(cases)
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 async def main() -> None:
@@ -25,6 +78,7 @@ async def main() -> None:
     await runpy.run_path(str(STREAM_RECEIVER))["run_smoke"](
         large_size=33 * 1024 * 1024 + 1,
     )
+    await verify_copy_metadata()
     store = S3Store(
         "smoke-bucket",
         prefix="scope",

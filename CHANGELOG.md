@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.1+athos.5
+
+- Add optional replacement user metadata to the existing `copy` / `copy_async`
+  APIs and store methods for same-store S3 overwrite copies. Omitted metadata
+  preserves the existing request; an empty mapping clears user metadata.
+- Preserve S3 tags and match `MetadataDirective=REPLACE` semantics for standard
+  headers. Unsupported providers and copy-if-not-exists combinations fail explicitly.
+
 ## 0.12.1+athos.4
 
 - Remove the 32 MiB cap from eligible single-part S3 Path streaming. Explicit
