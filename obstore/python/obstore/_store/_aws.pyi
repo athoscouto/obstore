@@ -536,6 +536,20 @@ class S3CredentialProvider(Protocol):
     def __call__(self) -> S3Credential | Coroutine[Any, Any, S3Credential]:
         """Return an `S3Credential`."""
 
+class S3RequestMetrics:
+    """Shared, cumulative S3 HTTP transport-attempt counters.
+
+    Includes retries and transport failures, not billable/successful request
+    counts. Credentials and local presigning are excluded. Share a handle among
+    bucket stores and register it only once in a metrics collector. Snapshots
+    do not reset counts or retain stores, keys, URLs, or credentials.
+    Pickling creates a fresh process-local handle with zero counts.
+    """
+
+    def __init__(self) -> None: ...
+    def snapshot(self) -> dict[str, int]:
+        """Return fixed S3 API names and cumulative counts, including zeros."""
+
 class S3Store:
     """Interface to an Amazon S3 bucket.
 
@@ -561,6 +575,7 @@ class S3Store:
         *,
         prefix: str | None = None,
         literal_prefix: bool = False,
+        request_metrics: S3RequestMetrics | None = None,
         config: S3Config | None = None,
         client_options: ClientConfig | None = None,
         retry_config: RetryConfig | None = None,
@@ -575,6 +590,7 @@ class S3Store:
         Keyword Args:
             prefix: A prefix within the bucket to use for all operations.
             literal_prefix: Use literal string prefixes for `list` operations. Defaults to `False`.
+            request_metrics: Optional shared counter handle for S3 transport attempts.
             config: AWS configuration. Values in this config will override values inferred from the environment. Defaults to None.
             client_options: HTTP Client options. Defaults to None.
             retry_config: Retry configuration. Defaults to None.
@@ -591,6 +607,7 @@ class S3Store:
         url: str,
         *,
         literal_prefix: bool = False,
+        request_metrics: S3RequestMetrics | None = None,
         config: S3Config | None = None,
         client_options: ClientConfig | None = None,
         retry_config: RetryConfig | None = None,
@@ -616,6 +633,7 @@ class S3Store:
             url: well-known storage URL.
 
             literal_prefix: Use literal string prefixes for `list` operations. Defaults to `False`.
+            request_metrics: Optional shared counter handle for S3 transport attempts.
 
         Keyword Args:
             config: AWS Configuration. Values in this config will override values inferred from the url. Defaults to None.
