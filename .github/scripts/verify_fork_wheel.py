@@ -33,7 +33,7 @@ async def verify_copy_metadata() -> None:
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, *_args: object) -> None:
+        def log_message(self, format: str, *_args: object) -> None:  # noqa: A002
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
