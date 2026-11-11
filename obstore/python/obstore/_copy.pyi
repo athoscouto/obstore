@@ -1,6 +1,15 @@
+from collections.abc import Mapping
+
 from ._store import ObjectStore
 
-def copy(store: ObjectStore, from_: str, to: str, *, overwrite: bool = True) -> None:
+def copy(
+    store: ObjectStore,
+    from_: str,
+    to: str,
+    *,
+    overwrite: bool = True,
+    metadata: Mapping[str, str] | None = None,
+) -> None:
     """Copy an object from one path to another in the same object store.
 
     Args:
@@ -16,6 +25,15 @@ def copy(store: ObjectStore, from_: str, to: str, *, overwrite: bool = True) -> 
 
             Will return an error if the destination already has an object.
 
+        metadata: Replacement custom metadata for S3 copies. `None` preserves source
+            metadata; an empty mapping removes all custom metadata. Keys are sent as
+            `x-amz-meta-{key}`, so `content-type` is custom metadata and does not set
+            the standard `Content-Type` header. S3's replace directive also resets
+            standard metadata headers such as `Content-Type`, `Cache-Control`, and
+            `Content-Disposition` unless the service supplies defaults. Metadata is
+            not supported with `overwrite=False` or by non-S3 stores. Source object
+            tags continue to be copied.
+
     """
 
 async def copy_async(
@@ -24,6 +42,7 @@ async def copy_async(
     to: str,
     *,
     overwrite: bool = True,
+    metadata: Mapping[str, str] | None = None,
 ) -> None:
     """Call `copy` asynchronously.
 
