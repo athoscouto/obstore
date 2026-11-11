@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     import socket
 
     from obstore import Attributes
-    from obstore.store import ClientConfig
+    from obstore.store import ClientConfig, S3RequestMetrics
 
 
 class _Receiver(socketserver.ThreadingTCPServer):
@@ -317,7 +317,11 @@ def _assert_buffered(receiver: _Receiver, payload: bytes, *, conditional: bool) 
         raise AssertionError("conditional write lost its precondition")
 
 
-async def run_smoke(*, large_size: int | None = None) -> None:
+async def run_smoke(
+    *,
+    large_size: int | None = None,
+    request_metrics: S3RequestMetrics | None = None,
+) -> None:
     """Exercise public Path streaming against an ordinary AWS HTTPS endpoint."""
     import obstore
     from obstore.store import S3Store
@@ -362,6 +366,7 @@ async def run_smoke(*, large_size: int | None = None) -> None:
                         "conditional_put": "etag",
                     },
                     prefix="test-prefix",
+                    request_metrics=request_metrics,
                     client_options={
                         **client_options,
                         "proxy_url": f"http://127.0.0.1:{receiver.server_address[1]}",
