@@ -148,6 +148,22 @@ def _create_cert(root: Path) -> tuple[Path, Path, Path]:
         raise RuntimeError("OpenSSL is required for the local TLS smoke receiver")
     ca_cert, ca_key = root / "ca.pem", root / "ca-key.pem"
     cert, key = root / "cert.pem", root / "key.pem"
+    # LibreSSL appends -addext values to ambient x509_extensions, producing
+    # duplicate OIDs. Keep the test CA configuration self-contained instead.
+    ca_config = root / "ca.cnf"
+    ca_config.write_text(
+        """[req]
+distinguished_name=subject
+x509_extensions=ca
+prompt=no
+[subject]
+CN=Obstore smoke test CA
+[ca]
+basicConstraints=critical,CA:TRUE,pathlen:0
+keyUsage=critical,keyCertSign,cRLSign
+subjectKeyIdentifier=hash
+""",
+    )
     subprocess.run(  # noqa: S603 - executable and arguments are fixed test inputs
         [
             openssl,
@@ -163,14 +179,8 @@ def _create_cert(root: Path) -> tuple[Path, Path, Path]:
             str(ca_cert),
             "-days",
             "1",
-            "-subj",
-            "/CN=Obstore smoke test CA",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE,pathlen:0",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
-            "-addext",
-            "subjectKeyIdentifier=hash",
+            "-config",
+            str(ca_config),
         ],
         check=True,
         stdout=subprocess.DEVNULL,
@@ -181,6 +191,8 @@ def _create_cert(root: Path) -> tuple[Path, Path, Path]:
         [
             openssl,
             "req",
+            "-config",
+            str(ca_config),
             "-new",
             "-newkey",
             "rsa:2048",
