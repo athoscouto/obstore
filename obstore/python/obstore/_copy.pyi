@@ -39,6 +39,17 @@ def copy(
     destination_store: S3Store | None = None,
     source_version_id: str | None = None,
     return_result: bool,
+) -> PutResult | None: ...
+def copy(  # type: ignore[misc] # docstring in pyi file
+    store: ObjectStore,
+    from_: str,
+    to: str,
+    *,
+    overwrite: bool = True,
+    metadata: Mapping[str, str] | None = None,
+    destination_store: S3Store | None = None,
+    source_version_id: str | None = None,
+    return_result: bool = False,
 ) -> PutResult | None:
     """Copy an object, optionally to another S3 store.
 
@@ -115,6 +126,17 @@ async def copy_async(
     destination_store: S3Store | None = None,
     source_version_id: str | None = None,
     return_result: bool,
+) -> PutResult | None: ...
+async def copy_async(  # type: ignore[misc] # docstring in pyi file
+    store: ObjectStore,
+    from_: str,
+    to: str,
+    *,
+    overwrite: bool = True,
+    metadata: Mapping[str, str] | None = None,
+    destination_store: S3Store | None = None,
+    source_version_id: str | None = None,
+    return_result: bool = False,
 ) -> PutResult | None:
     """Call `copy` asynchronously.
 
