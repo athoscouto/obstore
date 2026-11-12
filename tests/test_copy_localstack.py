@@ -14,6 +14,8 @@ from obstore.store import MemoryStore, S3Store
 if TYPE_CHECKING:
     from types_boto3_s3.type_defs import HeadObjectOutputTypeDef, TagTypeDef
 
+    from obstore.store import S3Config
+
 
 @pytest.mark.skipif(
     not os.environ.get("OBSTORE_TEST_LOCALSTACK_ENDPOINT"),
@@ -178,3 +180,136 @@ def test_s3_copy_metadata_localstack():  # noqa: PLR0915
             if key := item.get("Key"):
                 sdk.delete_object(Bucket=bucket, Key=key)
         sdk.delete_bucket(Bucket=bucket)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("OBSTORE_TEST_LOCALSTACK_ENDPOINT"),
+    reason="set OBSTORE_TEST_LOCALSTACK_ENDPOINT to run LocalStack coverage",
+)
+@pytest.mark.parametrize("metadata", [None, {}, {"content-type": "replacement"}])
+def test_cross_store_copy_preserves_sdk_contracts(
+    metadata: dict[str, str] | None,
+):
+    endpoint = os.environ["OBSTORE_TEST_LOCALSTACK_ENDPOINT"]
+    source_bucket = f"obstore-copy-source-{uuid.uuid4().hex}"
+    destination_bucket = f"obstore-copy-destination-{uuid.uuid4().hex}"
+    sdk = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name="us-east-1",
+        aws_access_key_id=os.environ.get("LOCALSTACK_ACCESS_KEY_ID", "test"),
+        aws_secret_access_key=os.environ.get("LOCALSTACK_SECRET_ACCESS_KEY", "test"),
+    )
+    buckets = (source_bucket, destination_bucket)
+    for bucket in buckets:
+        sdk.create_bucket(Bucket=bucket)
+        sdk.put_bucket_versioning(
+            Bucket=bucket,
+            VersioningConfiguration={"Status": "Enabled"},
+        )
+    options: S3Config = {
+        "endpoint": endpoint,
+        "region": "us-east-1",
+        "access_key_id": os.environ.get("LOCALSTACK_ACCESS_KEY_ID", "test"),
+        "secret_access_key": os.environ.get("LOCALSTACK_SECRET_ACCESS_KEY", "test"),
+        "virtual_hosted_style_request": False,
+    }
+    source = S3Store(
+        source_bucket,
+        prefix="incoming",
+        config=options,
+        client_options={"allow_http": True},
+    )
+    destination = S3Store(
+        destination_bucket,
+        prefix="processed",
+        config=options,
+        client_options={"allow_http": True},
+    )
+    key = "document ação 50%.pdf"
+    source_key = f"incoming/{key}"
+    destination_key = f"processed/{key}"
+    try:
+        first = sdk.put_object(
+            Bucket=source_bucket,
+            Key=source_key,
+            Body=b"original-version",
+            Metadata={"content-type": "custom-type", "source": "original"},
+            ContentType="application/pdf",
+            CacheControl="private",
+            Tagging="team=legal",
+        )
+        sdk.put_object(Bucket=source_bucket, Key=source_key, Body=b"newer-version")
+        source_version = first["VersionId"]
+        result = source.copy(
+            key,
+            key,
+            destination_store=destination,
+            source_version_id=source_version,
+            metadata=metadata,
+            return_result=True,
+        )
+        control_key = "sdk-control"
+        if metadata is None:
+            sdk.copy_object(
+                Bucket=destination_bucket,
+                Key=control_key,
+                CopySource={
+                    "Bucket": source_bucket,
+                    "Key": source_key,
+                    "VersionId": source_version,
+                },
+                MetadataDirective="COPY",
+                TaggingDirective="COPY",
+            )
+        else:
+            sdk.copy_object(
+                Bucket=destination_bucket,
+                Key=control_key,
+                CopySource={
+                    "Bucket": source_bucket,
+                    "Key": source_key,
+                    "VersionId": source_version,
+                },
+                MetadataDirective="REPLACE",
+                Metadata=metadata,
+                TaggingDirective="COPY",
+            )
+        actual = sdk.head_object(Bucket=destination_bucket, Key=destination_key)
+        expected = sdk.head_object(Bucket=destination_bucket, Key=control_key)
+        assert result is not None
+        assert result["version"] == actual["VersionId"]
+        assert result["e_tag"] == actual["ETag"]
+        assert (
+            sdk.get_object(Bucket=destination_bucket, Key=destination_key)[
+                "Body"
+            ].read()
+            == b"original-version"
+        )
+        for field in ("ContentType", "ContentLength", "CacheControl", "Metadata"):
+            assert actual.get(field) == expected.get(field)
+        assert (
+            sdk.get_object_tagging(Bucket=destination_bucket, Key=destination_key)[
+                "TagSet"
+            ]
+            == sdk.get_object_tagging(Bucket=destination_bucket, Key=control_key)[
+                "TagSet"
+            ]
+        )
+        assert (
+            sdk.get_object(Bucket=source_bucket, Key=source_key)["Body"].read()
+            == b"newer-version"
+        )
+    finally:
+        for bucket in buckets:
+            versions = sdk.list_object_versions(Bucket=bucket)
+            for item in [
+                *versions.get("Versions", []),
+                *versions.get("DeleteMarkers", []),
+            ]:
+                sdk.delete_object(
+                    Bucket=bucket,
+                    Key=item["Key"],
+                    VersionId=item["VersionId"],
+                )
+            sdk.delete_bucket(Bucket=bucket)

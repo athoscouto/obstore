@@ -1,18 +1,129 @@
 use std::collections::HashMap;
 
-use object_store::{aws::S3CopyMetadata, CopyOptions};
+use object_store::{aws::S3CopyMetadata, path::Path, CopyOptions, PutResult};
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use pyo3_async_runtimes::tokio::get_runtime;
-use pyo3_object_store::{
-    PyObjectStore, PyObjectStoreError, PyObjectStoreResult, PyPath, PyS3Store,
-};
+use pyo3_object_store::{PyObjectStore, PyObjectStoreResult, PyPath, PyS3Store};
 
-use crate::utils::PyNone;
+use crate::put::PyPutResult;
+
+/// Keep ordinary copies generic; extended S3 copies use the destination transport.
+enum PreparedCopy {
+    Standard {
+        store: PyObjectStore,
+        from: Path,
+        to: Path,
+        options: CopyOptions,
+    },
+    S3 {
+        source: PyS3Store,
+        destination: PyS3Store,
+        from: Path,
+        to: Path,
+        version: Option<String>,
+        metadata: Option<S3CopyMetadata>,
+        return_result: bool,
+    },
+}
+
+impl PreparedCopy {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        store: Bound<'_, PyAny>,
+        from: PyPath,
+        to: PyPath,
+        overwrite: bool,
+        metadata: Option<Bound<'_, PyAny>>,
+        destination_store: Option<Bound<'_, PyAny>>,
+        source_version_id: Option<String>,
+        return_result: bool,
+    ) -> PyResult<Self> {
+        let metadata = extract_metadata(metadata)?;
+        if destination_store.is_some() || source_version_id.is_some() || return_result {
+            if !overwrite {
+                return Err(PyNotImplementedError::new_err(
+                    "extended S3 copies require overwrite=True",
+                ));
+            }
+            let source = store
+                .extract::<PyS3Store>()
+                .map_err(|_| PyNotImplementedError::new_err("extended copies require S3 stores"))?;
+            let destination = match destination_store {
+                Some(store) => store.extract::<PyS3Store>().map_err(|_| {
+                    PyNotImplementedError::new_err("extended copies require S3 stores")
+                })?,
+                None => source.clone(),
+            };
+            destination
+                .as_ref()
+                .inner()
+                .validate_copy_source(source.as_ref().inner())
+                .map_err(pyo3_object_store::PyObjectStoreError::from)?;
+            Ok(Self::S3 {
+                source,
+                destination,
+                from: from.into(),
+                to: to.into(),
+                version: source_version_id,
+                metadata: metadata.map(S3CopyMetadata),
+                return_result,
+            })
+        } else {
+            let is_s3 = store.cast::<PyS3Store>().is_ok();
+            Ok(Self::Standard {
+                store: store.extract()?,
+                from: from.into(),
+                to: to.into(),
+                options: copy_options(is_s3, overwrite, metadata)?,
+            })
+        }
+    }
+
+    async fn execute(self) -> PyObjectStoreResult<Option<PutResult>> {
+        match self {
+            Self::Standard {
+                store,
+                from,
+                to,
+                options,
+            } => {
+                store.as_ref().copy_opts(&from, &to, options).await?;
+                Ok(None)
+            }
+            Self::S3 {
+                source,
+                destination,
+                from,
+                to,
+                version,
+                metadata,
+                return_result,
+            } => {
+                let source = source.into_inner();
+                let destination = destination.into_inner();
+                let from = source.full_path(&from);
+                let to = destination.full_path(&to);
+                let result = destination
+                    .inner()
+                    .copy_from(
+                        source.inner(),
+                        &from,
+                        &to,
+                        version.as_deref(),
+                        metadata.as_ref(),
+                    )
+                    .await?;
+                Ok(return_result.then_some(result))
+            }
+        }
+    }
+}
 
 #[pyfunction]
-#[pyo3(signature = (store, from_, to, *, overwrite=true, metadata=None))]
+#[pyo3(signature = (store, from_, to, *, overwrite=true, metadata=None, destination_store=None, source_version_id=None, return_result=false))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn copy(
     py: Python,
     store: Bound<'_, PyAny>,
@@ -20,22 +131,30 @@ pub(crate) fn copy(
     to: PyPath,
     overwrite: bool,
     metadata: Option<Bound<'_, PyAny>>,
-) -> PyObjectStoreResult<()> {
-    let is_s3 = store.cast::<PyS3Store>().is_ok();
-    let store: PyObjectStore = store.extract()?;
-    let metadata = extract_metadata(metadata)?;
-    let options = copy_options(is_s3, overwrite, metadata)?;
-    let runtime = get_runtime();
-    let from_ = from_.into();
-    let to = to.into();
+    destination_store: Option<Bound<'_, PyAny>>,
+    source_version_id: Option<String>,
+    return_result: bool,
+) -> PyObjectStoreResult<Option<PyPutResult>> {
+    let copy = PreparedCopy::new(
+        store,
+        from_,
+        to,
+        overwrite,
+        metadata,
+        destination_store,
+        source_version_id,
+        return_result,
+    )?;
     py.detach(|| {
-        runtime.block_on(store.as_ref().copy_opts(&from_, &to, options))?;
-        Ok::<_, PyObjectStoreError>(())
+        get_runtime()
+            .block_on(copy.execute())
+            .map(|result| result.map(PyPutResult::new))
     })
 }
 
 #[pyfunction]
-#[pyo3(signature = (store, from_, to, *, overwrite=true, metadata=None))]
+#[pyo3(signature = (store, from_, to, *, overwrite=true, metadata=None, destination_store=None, source_version_id=None, return_result=false))]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn copy_async<'py>(
     py: Python<'py>,
     store: Bound<'py, PyAny>,
@@ -43,20 +162,23 @@ pub(crate) fn copy_async<'py>(
     to: PyPath,
     overwrite: bool,
     metadata: Option<Bound<'py, PyAny>>,
+    destination_store: Option<Bound<'py, PyAny>>,
+    source_version_id: Option<String>,
+    return_result: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let is_s3 = store.cast::<PyS3Store>().is_ok();
-    let store: PyObjectStore = store.extract()?;
-    let metadata = extract_metadata(metadata)?;
-    let options = copy_options(is_s3, overwrite, metadata)?;
-    let from_ = from_.into();
-    let to = to.into();
+    let copy = PreparedCopy::new(
+        store,
+        from_,
+        to,
+        overwrite,
+        metadata,
+        destination_store,
+        source_version_id,
+        return_result,
+    )?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        store
-            .as_ref()
-            .copy_opts(&from_, &to, options)
-            .await
-            .map_err(PyObjectStoreError::ObjectStoreError)?;
-        Ok(PyNone)
+        let result = copy.execute().await?;
+        Ok(result.map(PyPutResult::new))
     })
 }
 

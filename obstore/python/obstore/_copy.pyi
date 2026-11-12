@@ -1,7 +1,10 @@
 from collections.abc import Mapping
+from typing import Literal, overload
 
-from ._store import ObjectStore
+from ._put import PutResult
+from ._store import ObjectStore, S3Store
 
+@overload
 def copy(
     store: ObjectStore,
     from_: str,
@@ -9,8 +12,35 @@ def copy(
     *,
     overwrite: bool = True,
     metadata: Mapping[str, str] | None = None,
-) -> None:
-    """Copy an object from one path to another in the same object store.
+    destination_store: S3Store | None = None,
+    source_version_id: str | None = None,
+    return_result: Literal[False] = False,
+) -> None: ...
+@overload
+def copy(
+    store: ObjectStore,
+    from_: str,
+    to: str,
+    *,
+    overwrite: bool = True,
+    metadata: Mapping[str, str] | None = None,
+    destination_store: S3Store | None = None,
+    source_version_id: str | None = None,
+    return_result: Literal[True],
+) -> PutResult: ...
+@overload
+def copy(
+    store: ObjectStore,
+    from_: str,
+    to: str,
+    *,
+    overwrite: bool = True,
+    metadata: Mapping[str, str] | None = None,
+    destination_store: S3Store | None = None,
+    source_version_id: str | None = None,
+    return_result: bool,
+) -> PutResult | None:
+    """Copy an object, optionally to another S3 store.
 
     Args:
         store: The ObjectStore instance to use.
@@ -25,6 +55,20 @@ def copy(
 
             Will return an error if the destination already has an object.
 
+        destination_store: Optional destination S3 store. The original store remains
+            the source. Each path is relative to its own store's prefix. Omit this
+            to copy within the original store. Stores must use the same service
+            endpoint; different regional endpoints or service aliases are not
+            supported. The destination's credentials must read the source and write
+            the destination. No data passes through Python. Extended copies use
+            CopyObject (maximum 5 GB) and require `overwrite=True`.
+
+        source_version_id: Optional S3 source version to copy.
+
+        return_result: Return the destination ETag and version as a `PutResult`.
+            Defaults to `False`, preserving the existing `None` return value.
+            Supported only for S3 with `overwrite=True`.
+
         metadata: Replacement custom metadata for S3 copies. `None` preserves source
             metadata; an empty mapping removes all custom metadata. Keys are sent as
             `x-amz-meta-{key}`, so `content-type` is custom metadata and does not set
@@ -36,6 +80,7 @@ def copy(
 
     """
 
+@overload
 async def copy_async(
     store: ObjectStore,
     from_: str,
@@ -43,7 +88,34 @@ async def copy_async(
     *,
     overwrite: bool = True,
     metadata: Mapping[str, str] | None = None,
-) -> None:
+    destination_store: S3Store | None = None,
+    source_version_id: str | None = None,
+    return_result: Literal[False] = False,
+) -> None: ...
+@overload
+async def copy_async(
+    store: ObjectStore,
+    from_: str,
+    to: str,
+    *,
+    overwrite: bool = True,
+    metadata: Mapping[str, str] | None = None,
+    destination_store: S3Store | None = None,
+    source_version_id: str | None = None,
+    return_result: Literal[True],
+) -> PutResult: ...
+@overload
+async def copy_async(
+    store: ObjectStore,
+    from_: str,
+    to: str,
+    *,
+    overwrite: bool = True,
+    metadata: Mapping[str, str] | None = None,
+    destination_store: S3Store | None = None,
+    source_version_id: str | None = None,
+    return_result: bool,
+) -> PutResult | None:
     """Call `copy` asynchronously.
 
     Refer to the documentation for [copy][obstore.copy].

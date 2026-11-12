@@ -313,6 +313,12 @@ impl<'py> FromPyObject<'_, 'py> for PutInput {
 
 pub(crate) struct PyPutResult(PutResult);
 
+impl PyPutResult {
+    pub(crate) fn new(result: PutResult) -> Self {
+        Self(result)
+    }
+}
+
 impl<'py> IntoPyObject<'py> for PyPutResult {
     type Target = PyDict;
     type Output = Bound<'py, PyDict>;
