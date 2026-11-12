@@ -12,7 +12,7 @@ from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import obstore
 from obstore.store import MemoryStore, S3Store
@@ -30,6 +30,7 @@ async def verify_copy_metadata() -> None:
             body = b'<CopyObjectResult><ETag>"copy-smoke"</ETag></CopyObjectResult>'
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("x-amz-version-id", "copy-version")
             self.end_headers()
             self.wfile.write(body)
 
@@ -65,6 +66,29 @@ async def verify_copy_metadata() -> None:
                 if key.startswith("x-amz-meta-")
             } == (metadata or {})
         assert len(requests) == len(cases)
+        destination = S3Store(
+            "destination-smoke",
+            prefix="target",
+            region="us-east-1",
+            endpoint=f"http://127.0.0.1:{server.server_port}",
+            skip_signature=True,
+            virtual_hosted_style_request=False,
+            client_options={"allow_http": True},
+        )
+        result = await store.copy_async(
+            "source 50%.pdf",
+            "copied.pdf",
+            destination_store=destination,
+            source_version_id="version/+%=1",
+            return_result=True,
+        )
+        assert result == {"e_tag": '"copy-smoke"', "version": "copy-version"}
+        path, headers = requests[-1]
+        headers = {key.lower(): value for key, value in headers.items()}
+        assert path == "/destination-smoke/target/copied.pdf"
+        source = urlsplit(headers["x-amz-copy-source"])
+        assert unquote(source.path).lstrip("/") == "copy-smoke/scope/source 50%.pdf"
+        assert parse_qs(source.query) == {"versionId": ["version/+%=1"]}
     finally:
         server.shutdown()
         thread.join()
@@ -79,6 +103,16 @@ async def main() -> None:
         large_size=33 * 1024 * 1024 + 1,
     )
     await verify_copy_metadata()
+    attributes_store = MemoryStore()
+    await attributes_store.put_async(
+        "metadata",
+        b"payload",
+        attributes={"Content-Type": "application/pdf"},
+        metadata={"content-type": "custom-value"},
+    )
+    details = await attributes_store.get_async("metadata", options={"head": True})
+    assert details.metadata == {"content-type": "custom-value"}
+    assert details.properties == {"Content-Type": "application/pdf"}
     store = S3Store(
         "smoke-bucket",
         prefix="scope",

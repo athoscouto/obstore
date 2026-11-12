@@ -287,6 +287,8 @@ def _assert_request(
     if include_metadata:
         if headers.get(b"content-type") != b"application/octet-stream":
             raise AssertionError("streaming upload lost Content-Type")
+        if headers.get(b"x-amz-meta-content-type") != b"custom-value":
+            raise AssertionError("streaming upload lost reserved-name custom metadata")
         if headers.get(b"x-amz-tagging") != b"kind=streaming-smoke":
             raise AssertionError("streaming upload lost object tags")
     if headers.get(b"x-amz-content-sha256") != b"STREAMING-UNSIGNED-PAYLOAD-TRAILER":
@@ -377,6 +379,9 @@ async def run_smoke(*, large_size: int | None = None) -> None:
                         f"streamed-{name}.bin",
                         source,
                         attributes=upload_attributes,
+                        metadata={"content-type": "custom-value"}
+                        if name == "default"
+                        else None,
                         tags={"kind": "streaming-smoke"} if name == "default" else None,
                         use_multipart=False if name == "default" else None,
                     ),

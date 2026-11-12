@@ -62,6 +62,24 @@ impl PyAttributes {
     pub fn into_inner(self) -> Attributes {
         self.0
     }
+
+    /// Explicit custom metadata must never be interpreted as a system attribute.
+    pub fn with_metadata(
+        attributes: Option<Self>,
+        metadata: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Option<Self>> {
+        let Some(metadata) = metadata else {
+            return Ok(attributes);
+        };
+        let mapping = PyDict::new(metadata.py());
+        mapping.call_method1("update", (metadata,))?;
+        let metadata = mapping.extract::<HashMap<String, String>>()?;
+        let mut attributes = attributes.map(Self::into_inner).unwrap_or_default();
+        for (name, value) in metadata {
+            attributes.insert(Attribute::Metadata(Cow::Owned(name)), value.into());
+        }
+        Ok(Some(Self(attributes)))
+    }
 }
 
 impl<'py> FromPyObject<'_, 'py> for PyAttributes {

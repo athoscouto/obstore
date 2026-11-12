@@ -105,6 +105,70 @@ impl AmazonS3 {
         &self.client.config.credentials
     }
 
+    /// Verify two stores address the same service, using effective runtime endpoints.
+    #[doc(hidden)]
+    pub fn validate_copy_source(&self, source: &AmazonS3) -> Result<()> {
+        fn service_endpoint(store: &AmazonS3) -> Result<Url> {
+            let config = &store.client.config;
+            let mut endpoint =
+                Url::parse(&config.bucket_endpoint).map_err(|source| Error::Generic {
+                    store: STORE,
+                    source: Box::new(source),
+                })?;
+            // Normalize either virtual-hosted or path-style bucket addressing.
+            let bucket_host = format!("{}.", config.bucket);
+            if let Some(host) = endpoint
+                .host_str()
+                .and_then(|host| host.strip_prefix(&bucket_host))
+            {
+                let host = host.to_owned();
+                endpoint
+                    .set_host(Some(&host))
+                    .map_err(|source| Error::Generic {
+                        store: STORE,
+                        source: Box::new(source),
+                    })?;
+            } else {
+                let bucket_path = format!("/{}", config.bucket);
+                if let Some(path) = endpoint
+                    .path()
+                    .trim_end_matches('/')
+                    .strip_suffix(&bucket_path)
+                {
+                    let path = path.to_owned();
+                    endpoint.set_path(&path);
+                }
+            }
+            Ok(endpoint)
+        }
+        if service_endpoint(self)? != service_endpoint(source)? {
+            return Err(Error::NotSupported {
+                source: "server-side copies require stores using the same S3 service endpoint"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Server-side copy from another S3 bucket, returning the written object's identity.
+    ///
+    /// The destination transport signs the request and must have permission to read
+    /// the source. This performs one CopyObject request (objects up to 5 GB).
+    #[doc(hidden)]
+    pub async fn copy_from(
+        &self,
+        source: &AmazonS3,
+        from: &Path,
+        to: &Path,
+        source_version: Option<&str>,
+        metadata: Option<&S3CopyMetadata>,
+    ) -> Result<PutResult> {
+        self.validate_copy_source(source)?;
+        self.client
+            .copy_from(&source.client, from, to, source_version, metadata)
+            .await
+    }
+
     /// Whether a file upload can use the private single-request streaming path.
     #[doc(hidden)]
     #[cfg(not(target_arch = "wasm32"))]

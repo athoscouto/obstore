@@ -313,6 +313,12 @@ impl<'py> FromPyObject<'_, 'py> for PutInput {
 
 pub(crate) struct PyPutResult(PutResult);
 
+impl PyPutResult {
+    pub(crate) fn new(result: PutResult) -> Self {
+        Self(result)
+    }
+}
+
 impl<'py> IntoPyObject<'py> for PyPutResult {
     type Target = PyDict;
     type Output = Bound<'py, PyDict>;
@@ -327,7 +333,7 @@ impl<'py> IntoPyObject<'py> for PyPutResult {
 }
 
 #[pyfunction]
-#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
+#[pyo3(signature = (store, path, file, *, attributes=None, metadata=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put(
     py: Python,
@@ -335,6 +341,7 @@ pub(crate) fn put(
     path: PyPath,
     file: PutInput,
     attributes: Option<PyAttributes>,
+    metadata: Option<Bound<'_, PyAny>>,
     tags: Option<PyTagSet>,
     mode: Option<PyPutMode>,
     use_multipart: Option<bool>,
@@ -342,6 +349,7 @@ pub(crate) fn put(
     multipart_threshold: Option<NonZeroUsize>,
     max_concurrency: usize,
 ) -> PyObjectStoreResult<PyPutResult> {
+    let attributes = PyAttributes::with_metadata(attributes, metadata)?;
     if matches!(file, PutInput::AsyncPush(_)) {
         return Err(
             PyValueError::new_err("Async input not allowed in 'put'. Use 'put_async'.").into(),
@@ -390,7 +398,7 @@ pub(crate) fn put(
 }
 
 #[pyfunction]
-#[pyo3(signature = (store, path, file, *, attributes=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
+#[pyo3(signature = (store, path, file, *, attributes=None, metadata=None, tags=None, mode=None, use_multipart=None, chunk_size=NonZeroUsize::new(5 * 1024 * 1024).unwrap(), multipart_threshold=None, max_concurrency=12))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put_async<'py>(
     py: Python<'py>,
@@ -398,6 +406,7 @@ pub(crate) fn put_async<'py>(
     path: PyPath,
     mut file: PutInput,
     attributes: Option<PyAttributes>,
+    metadata: Option<Bound<'_, PyAny>>,
     tags: Option<PyTagSet>,
     mode: Option<PyPutMode>,
     use_multipart: Option<bool>,
@@ -405,6 +414,7 @@ pub(crate) fn put_async<'py>(
     multipart_threshold: Option<NonZeroUsize>,
     max_concurrency: usize,
 ) -> PyResult<Bound<'py, PyAny>> {
+    let attributes = PyAttributes::with_metadata(attributes, metadata)?;
     // Preserve the generic store route while retaining a typed S3 handle for the
     // narrowly eligible native file-stream path.
     let s3_store = store.extract::<PyS3Store>().ok();

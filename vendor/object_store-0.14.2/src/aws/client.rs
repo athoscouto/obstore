@@ -117,6 +117,12 @@ pub(crate) enum Error {
     #[error("Got invalid list response: {}", source)]
     InvalidListResponse { source: quick_xml::de::DeError },
 
+    #[error("Error getting copy response body: {}", source)]
+    CopyResponseBody { source: HttpError },
+
+    #[error("Got invalid copy response: {}", source)]
+    InvalidCopyResponse { source: quick_xml::de::DeError },
+
     #[error("Got invalid multipart response: {}", source)]
     InvalidMultipartResponse { source: quick_xml::de::DeError },
 
@@ -678,7 +684,26 @@ impl S3Client {
         to: &'a Path,
         metadata: Option<&super::S3CopyMetadata>,
     ) -> Result<Request<'a>> {
-        let source = format!("{}/{}", self.config.bucket, encode_path(from));
+        self.copy_request_from(&self.config.bucket, from, to, None, metadata)
+    }
+
+    /// Build a server-side copy targeting this client's bucket.
+    pub(crate) fn copy_request_from<'a>(
+        &'a self,
+        source_bucket: &str,
+        from: &Path,
+        to: &'a Path,
+        source_version: Option<&str>,
+        metadata: Option<&super::S3CopyMetadata>,
+    ) -> Result<Request<'a>> {
+        let mut source = format!("{}/{}", source_bucket, encode_path(from));
+        if let Some(version) = source_version {
+            source.push_str("?versionId=");
+            source.extend(percent_encoding::utf8_percent_encode(
+                version,
+                &crate::util::STRICT_ENCODE_SET,
+            ));
+        }
 
         let mut copy_source_encryption_headers = HeaderMap::new();
         if let Some(customer_algorithm) = self
@@ -748,6 +773,50 @@ impl S3Client {
             request = request.headers(headers);
         }
         Ok(request)
+    }
+
+    /// Copy from an explicitly selected source bucket and return destination identity.
+    pub(crate) async fn copy_from(
+        &self,
+        source: &S3Client,
+        from: &Path,
+        to: &Path,
+        source_version: Option<&str>,
+        metadata: Option<&super::S3CopyMetadata>,
+    ) -> Result<PutResult> {
+        if source
+            .config
+            .encryption_headers
+            .0
+            .keys()
+            .chain(self.config.encryption_headers.0.keys())
+            .any(|name| {
+                name.as_str()
+                    .starts_with("x-amz-server-side-encryption-customer-")
+            })
+        {
+            return Err(crate::Error::NotSupported {
+                source: "extended copies with SSE-C encryption are not supported".into(),
+            });
+        }
+        let response = self
+            .copy_request_from(&source.config.bucket, from, to, source_version, metadata)?
+            .send()
+            .await?;
+        let (parts, body) = response.into_parts();
+        let version = get_version(&parts.headers, VERSION_HEADER)
+            .map_err(|source| Error::Metadata { source })?;
+        let data = body
+            .bytes()
+            .await
+            .map_err(|source| Error::CopyResponseBody { source })?;
+        let response: CopyPartResult = quick_xml::de::from_reader(data.reader())
+            .map_err(|source| Error::InvalidCopyResponse { source })?;
+        Ok(PutResult {
+            e_tag: Some(response.e_tag),
+            version,
+            extensions: parts.extensions,
+        })
     }
 
     pub(crate) async fn create_multipart(

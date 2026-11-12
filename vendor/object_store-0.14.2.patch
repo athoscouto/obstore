@@ -45,7 +45,20 @@
  use quick_xml::events::{self as xml_events};
  use serde::{Deserialize, Serialize};
  use std::sync::Arc;
-@@ -450,16 +450,40 @@
+@@ -116,6 +116,12 @@
+ 
+     #[error("Got invalid list response: {}", source)]
+     InvalidListResponse { source: quick_xml::de::DeError },
++
++    #[error("Error getting copy response body: {}", source)]
++    CopyResponseBody { source: HttpError },
++
++    #[error("Got invalid copy response: {}", source)]
++    InvalidCopyResponse { source: quick_xml::de::DeError },
+ 
+     #[error("Got invalid multipart response: {}", source)]
+     InvalidMultipartResponse { source: quick_xml::de::DeError },
+@@ -450,16 +456,40 @@
          Ok(self)
      }
  
@@ -95,7 +108,7 @@
              }
          };
          let authorizer = credential.as_ref().map(|x| x.authorizer()).transpose()?;
-@@ -467,8 +491,8 @@
+@@ -467,8 +497,8 @@
          let sha = self.payload_sha256.as_ref().map(|x| x.as_ref());
  
          let path = self.path.as_ref();
@@ -106,7 +119,128 @@
              .retryable(&self.config.retry_config)
              .retry_on_conflict(self.retry_on_conflict)
              .idempotent(self.idempotent)
-@@ -1051,18 +1075,18 @@
+@@ -648,8 +678,32 @@
+     }
+ 
+     /// Make an S3 Copy request <https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html>
+-    pub(crate) fn copy_request<'a>(&'a self, from: &Path, to: &'a Path) -> Request<'a> {
+-        let source = format!("{}/{}", self.config.bucket, encode_path(from));
++    pub(crate) fn copy_request<'a>(
++        &'a self,
++        from: &Path,
++        to: &'a Path,
++        metadata: Option<&super::S3CopyMetadata>,
++    ) -> Result<Request<'a>> {
++        self.copy_request_from(&self.config.bucket, from, to, None, metadata)
++    }
++
++    /// Build a server-side copy targeting this client's bucket.
++    pub(crate) fn copy_request_from<'a>(
++        &'a self,
++        source_bucket: &str,
++        from: &Path,
++        to: &'a Path,
++        source_version: Option<&str>,
++        metadata: Option<&super::S3CopyMetadata>,
++    ) -> Result<Request<'a>> {
++        let mut source = format!("{}/{}", source_bucket, encode_path(from));
++        if let Some(version) = source_version {
++            source.push_str("?versionId=");
++            source.extend(percent_encoding::utf8_percent_encode(
++                version,
++                &crate::util::STRICT_ENCODE_SET,
++            ));
++        }
+ 
+         let mut copy_source_encryption_headers = HeaderMap::new();
+         if let Some(customer_algorithm) = self
+@@ -686,13 +740,83 @@
+             );
+         }
+ 
+-        self.request(Method::PUT, to)
++        let mut request = self
++            .request(Method::PUT, to)
+             .idempotent(true)
+             .retry_error_body(true)
+             .header(&COPY_SOURCE_HEADER, &source)
+             .headers(self.config.encryption_headers.clone().into())
+             .headers(copy_source_encryption_headers)
+-            .with_session_creds(false)
++            .with_session_creds(false);
++        if let Some(metadata) = metadata {
++            let mut headers = HeaderMap::new();
++            headers.insert(
++                "x-amz-metadata-directive",
++                http::HeaderValue::from_static("REPLACE"),
++            );
++            for (name, value) in &metadata.0 {
++                let name = format!("x-amz-meta-{name}");
++                let name = HeaderName::from_bytes(name.as_bytes()).map_err(|source| {
++                    crate::Error::Generic {
++                        store: STORE,
++                        source: Box::new(source),
++                    }
++                })?;
++                let value = http::HeaderValue::from_str(value).map_err(|source| {
++                    crate::Error::Generic {
++                        store: STORE,
++                        source: Box::new(source),
++                    }
++                })?;
++                headers.insert(name, value);
++            }
++            request = request.headers(headers);
++        }
++        Ok(request)
++    }
++
++    /// Copy from an explicitly selected source bucket and return destination identity.
++    pub(crate) async fn copy_from(
++        &self,
++        source: &S3Client,
++        from: &Path,
++        to: &Path,
++        source_version: Option<&str>,
++        metadata: Option<&super::S3CopyMetadata>,
++    ) -> Result<PutResult> {
++        if source
++            .config
++            .encryption_headers
++            .0
++            .keys()
++            .chain(self.config.encryption_headers.0.keys())
++            .any(|name| {
++                name.as_str()
++                    .starts_with("x-amz-server-side-encryption-customer-")
++            })
++        {
++            return Err(crate::Error::NotSupported {
++                source: "extended copies with SSE-C encryption are not supported".into(),
++            });
++        }
++        let response = self
++            .copy_request_from(&source.config.bucket, from, to, source_version, metadata)?
++            .send()
++            .await?;
++        let (parts, body) = response.into_parts();
++        let version = get_version(&parts.headers, VERSION_HEADER)
++            .map_err(|source| Error::Metadata { source })?;
++        let data = body
++            .bytes()
++            .await
++            .map_err(|source| Error::CopyResponseBody { source })?;
++        let response: CopyPartResult = quick_xml::de::from_reader(data.reader())
++            .map_err(|source| Error::InvalidCopyResponse { source })?;
++        Ok(PutResult {
++            e_tag: Some(response.e_tag),
++            version,
++            extensions: parts.extensions,
++        })
+     }
+ 
+     pub(crate) async fn create_multipart(
+@@ -1051,18 +1175,18 @@
  #[cfg(test)]
  mod tests {
      use super::*;
@@ -196,7 +330,12 @@
      use reqwest::Client;
 --- a/src/aws/mod.rs
 +++ b/src/aws/mod.rs
-@@ -40,13 +40,13 @@
+@@ -36,17 +36,17 @@
+ use futures_util::{StreamExt, TryStreamExt};
+ use http::header::{HeaderName, IF_MATCH, IF_NONE_MATCH};
+ use http::{Method, StatusCode};
+-use std::{sync::Arc, time::Duration};
++use std::{collections::HashMap, sync::Arc, time::Duration};
  use url::Url;
  
  use crate::aws::client::{CompleteMultipartMode, PutPartPayload, RequestError, S3Client};
@@ -212,10 +351,85 @@
  use crate::{
      CopyMode, CopyOptions, Error, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload,
      ObjectMeta, ObjectStore, Path, PutMode, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-@@ -99,6 +99,105 @@
+@@ -69,6 +69,10 @@
+ pub use checksum::Checksum;
+ pub use precondition::{S3ConditionalPut, S3CopyIfNotExists};
+ 
++/// Replacement user metadata for an S3 CopyObject request.
++#[derive(Debug, Clone)]
++pub struct S3CopyMetadata(pub HashMap<String, String>);
++
+ #[cfg(all(feature = "reqwest", not(target_arch = "wasm32")))]
+ pub use resolve::resolve_bucket_region;
+ 
+@@ -99,6 +103,169 @@
      /// Returns the [`AwsCredentialProvider`] used by [`AmazonS3`]
      pub fn credentials(&self) -> &AwsCredentialProvider {
          &self.client.config.credentials
++    }
++
++    /// Verify two stores address the same service, using effective runtime endpoints.
++    #[doc(hidden)]
++    pub fn validate_copy_source(&self, source: &AmazonS3) -> Result<()> {
++        fn service_endpoint(store: &AmazonS3) -> Result<Url> {
++            let config = &store.client.config;
++            let mut endpoint =
++                Url::parse(&config.bucket_endpoint).map_err(|source| Error::Generic {
++                    store: STORE,
++                    source: Box::new(source),
++                })?;
++            // Normalize either virtual-hosted or path-style bucket addressing.
++            let bucket_host = format!("{}.", config.bucket);
++            if let Some(host) = endpoint
++                .host_str()
++                .and_then(|host| host.strip_prefix(&bucket_host))
++            {
++                let host = host.to_owned();
++                endpoint
++                    .set_host(Some(&host))
++                    .map_err(|source| Error::Generic {
++                        store: STORE,
++                        source: Box::new(source),
++                    })?;
++            } else {
++                let bucket_path = format!("/{}", config.bucket);
++                if let Some(path) = endpoint
++                    .path()
++                    .trim_end_matches('/')
++                    .strip_suffix(&bucket_path)
++                {
++                    let path = path.to_owned();
++                    endpoint.set_path(&path);
++                }
++            }
++            Ok(endpoint)
++        }
++        if service_endpoint(self)? != service_endpoint(source)? {
++            return Err(Error::NotSupported {
++                source: "server-side copies require stores using the same S3 service endpoint"
++                    .into(),
++            });
++        }
++        Ok(())
++    }
++
++    /// Server-side copy from another S3 bucket, returning the written object's identity.
++    ///
++    /// The destination transport signs the request and must have permission to read
++    /// the source. This performs one CopyObject request (objects up to 5 GB).
++    #[doc(hidden)]
++    pub async fn copy_from(
++        &self,
++        source: &AmazonS3,
++        from: &Path,
++        to: &Path,
++        source_version: Option<&str>,
++        metadata: Option<&S3CopyMetadata>,
++    ) -> Result<PutResult> {
++        self.validate_copy_source(source)?;
++        self.client
++            .copy_from(&source.client, from, to, source_version, metadata)
++            .await
 +    }
 +
 +    /// Whether a file upload can use the private single-request streaming path.
@@ -318,7 +532,44 @@
      }
  
      /// Create a full URL to the resource specified by `path` with this instance's configuration.
-@@ -735,25 +834,25 @@
+@@ -405,19 +572,25 @@
+     async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
+         let CopyOptions {
+             mode,
+-            extensions: _,
++            extensions,
+         } = options;
+ 
+         match mode {
+             CopyMode::Overwrite => {
+                 self.client
+-                    .copy_request(from, to)
++                    .copy_request(from, to, extensions.get::<S3CopyMetadata>())?
+                     .idempotent(true)
+                     .send()
+                     .await?;
+                 Ok(())
+             }
+             CopyMode::Create => {
++                if extensions.get::<S3CopyMetadata>().is_some() {
++                    return Err(Error::NotSupported {
++                        source: "S3 metadata replacement is not supported with copy-if-not-exists"
++                            .into(),
++                    });
++                }
+                 let (k, v, status) = match &self.client.config.copy_if_not_exists {
+                     Some(S3CopyIfNotExists::Header(k, v)) => {
+                         (k, v, StatusCode::PRECONDITION_FAILED)
+@@ -471,7 +644,7 @@
+                     }
+                 };
+ 
+-                let req = self.client.copy_request(from, to);
++                let req = self.client.copy_request(from, to, None)?;
+                 match req.header(k, v).send().await {
+                     Err(RequestError::Retry { source, path })
+                         if source.status() == Some(status) =>
+@@ -735,25 +908,25 @@
  #[cfg(test)]
  mod tests {
      use super::*;
@@ -351,7 +602,7 @@
      use std::sync::atomic::{AtomicUsize, Ordering};
  
      const NON_EXISTENT_NAME: &str = "nonexistentname";
-@@ -764,6 +863,63 @@
+@@ -764,6 +937,63 @@
      /// Set `OBJECT_STORE_SIGNING_BUCKET` to run them against a bucket in your own account
      /// (e.g. real S3) without editing this source; it defaults to `test-bucket-for-signing`.
      const DEFAULT_SIGNING_BUCKET: &str = "test-bucket-for-signing";

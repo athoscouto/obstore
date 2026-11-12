@@ -108,6 +108,7 @@ class ObjectStoreMethods:
         [obspec](https://developmentseed.org/obspec/) instead.
     """
 
+    @overload
     def copy(
         self,
         from_: str,
@@ -115,8 +116,49 @@ class ObjectStoreMethods:
         *,
         overwrite: bool = True,
         metadata: Mapping[str, str] | None = None,
-    ) -> None:
-        """Copy an object from one path to another in the same object store.
+        destination_store: S3Store | None = None,
+        source_version_id: str | None = None,
+        return_result: Literal[False] = False,
+    ) -> None: ...
+
+    @overload
+    def copy(
+        self,
+        from_: str,
+        to: str,
+        *,
+        overwrite: bool = True,
+        metadata: Mapping[str, str] | None = None,
+        destination_store: S3Store | None = None,
+        source_version_id: str | None = None,
+        return_result: Literal[True],
+    ) -> PutResult: ...
+
+    @overload
+    def copy(
+        self,
+        from_: str,
+        to: str,
+        *,
+        overwrite: bool = True,
+        metadata: Mapping[str, str] | None = None,
+        destination_store: S3Store | None = None,
+        source_version_id: str | None = None,
+        return_result: bool,
+    ) -> PutResult | None: ...
+
+    def copy(  # noqa: PLR0913
+        self,
+        from_: str,
+        to: str,
+        *,
+        overwrite: bool = True,
+        metadata: Mapping[str, str] | None = None,
+        destination_store: S3Store | None = None,
+        source_version_id: str | None = None,
+        return_result: bool = False,
+    ) -> PutResult | None:
+        """Copy an object, optionally to another S3 store.
 
         Refer to the documentation for [copy][obstore.copy].
         """
@@ -126,8 +168,12 @@ class ObjectStoreMethods:
             to,
             overwrite=overwrite,
             metadata=metadata,
+            destination_store=destination_store,
+            source_version_id=source_version_id,
+            return_result=return_result,
         )
 
+    @overload
     async def copy_async(
         self,
         from_: str,
@@ -135,7 +181,48 @@ class ObjectStoreMethods:
         *,
         overwrite: bool = True,
         metadata: Mapping[str, str] | None = None,
-    ) -> None:
+        destination_store: S3Store | None = None,
+        source_version_id: str | None = None,
+        return_result: Literal[False] = False,
+    ) -> None: ...
+
+    @overload
+    async def copy_async(
+        self,
+        from_: str,
+        to: str,
+        *,
+        overwrite: bool = True,
+        metadata: Mapping[str, str] | None = None,
+        destination_store: S3Store | None = None,
+        source_version_id: str | None = None,
+        return_result: Literal[True],
+    ) -> PutResult: ...
+
+    @overload
+    async def copy_async(
+        self,
+        from_: str,
+        to: str,
+        *,
+        overwrite: bool = True,
+        metadata: Mapping[str, str] | None = None,
+        destination_store: S3Store | None = None,
+        source_version_id: str | None = None,
+        return_result: bool,
+    ) -> PutResult | None: ...
+
+    async def copy_async(  # noqa: PLR0913
+        self,
+        from_: str,
+        to: str,
+        *,
+        overwrite: bool = True,
+        metadata: Mapping[str, str] | None = None,
+        destination_store: S3Store | None = None,
+        source_version_id: str | None = None,
+        return_result: bool = False,
+    ) -> PutResult | None:
         """Call `copy` asynchronously.
 
         Refer to the documentation for [copy_async][obstore.copy_async].
@@ -146,6 +233,9 @@ class ObjectStoreMethods:
             to,
             overwrite=overwrite,
             metadata=metadata,
+            destination_store=destination_store,
+            source_version_id=source_version_id,
+            return_result=return_result,
         )
 
     def delete(self, paths: str | Sequence[str]) -> None:
@@ -499,6 +589,7 @@ class ObjectStoreMethods:
         file: IO[bytes] | Path | bytes | Buffer | Iterator[Buffer] | Iterable[Buffer],
         *,
         attributes: Attributes | None = None,
+        metadata: Mapping[str, str] | None = None,
         tags: dict[str, str] | None = None,
         mode: PutMode | None = None,
         use_multipart: bool | None = None,
@@ -515,6 +606,7 @@ class ObjectStoreMethods:
             path,
             file,
             attributes=attributes,
+            metadata=metadata,
             tags=tags,
             mode=mode,
             use_multipart=use_multipart,
@@ -536,6 +628,7 @@ class ObjectStoreMethods:
         | Iterable[Buffer],
         *,
         attributes: Attributes | None = None,
+        metadata: Mapping[str, str] | None = None,
         tags: dict[str, str] | None = None,
         mode: PutMode | None = None,
         use_multipart: bool | None = None,
@@ -552,6 +645,7 @@ class ObjectStoreMethods:
             path,
             file,
             attributes=attributes,
+            metadata=metadata,
             tags=tags,
             mode=mode,
             use_multipart=use_multipart,
