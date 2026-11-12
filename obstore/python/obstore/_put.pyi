@@ -1,5 +1,5 @@
 import sys
-from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import IO, Literal, TypeAlias, TypedDict
 
@@ -101,6 +101,7 @@ def put(
     file: IO[bytes] | Path | bytes | Buffer | Iterator[Buffer] | Iterable[Buffer],
     *,
     attributes: Attributes | None = None,
+    metadata: Mapping[str, str] | None = None,
     tags: dict[str, str] | None = None,
     mode: PutMode | None = None,
     use_multipart: bool | None = None,
@@ -152,6 +153,9 @@ def put(
 
             If this provided and is not `"overwrite"`, a non-multipart upload will be performed. Defaults to `"overwrite"`.
         attributes: Provide a set of `Attributes`. Defaults to `None`.
+        metadata: Custom metadata only, including names like `content-type` that
+            `attributes` interprets as system properties. When the same custom key
+            appears in both arguments, `metadata` takes precedence. Defaults to `None`.
         tags: Provide tags for this object. Defaults to `None`.
         use_multipart: Whether to use a multipart upload under the hood. Defaults using a multipart upload if the length of the file is greater than `multipart_threshold`. When `use_multipart` is `False`, the entire input will be materialized in memory as part of the upload.
         chunk_size: The size of chunks to use within each part of the multipart upload. Defaults to 5 MB.
@@ -173,6 +177,7 @@ async def put_async(
     | Iterable[Buffer],
     *,
     attributes: Attributes | None = None,
+    metadata: Mapping[str, str] | None = None,
     tags: dict[str, str] | None = None,
     mode: PutMode | None = None,
     use_multipart: bool | None = None,

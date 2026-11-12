@@ -175,6 +175,18 @@ class GetResult:
     def attributes(self) -> Attributes:
         """Additional object attributes."""
 
+    @property
+    def metadata(self) -> dict[str, str]:
+        """Custom metadata only; names never imply system properties."""
+
+    @property
+    def properties(self) -> Attributes:
+        """System properties only, such as Content-Type and Cache-Control.
+
+        Unlike `attributes`, this mapping excludes all custom metadata, so a
+        custom field named `Content-Type` does not replace the system property.
+        """
+
     def bytes(self) -> Bytes:
         """Collect the data into a `Bytes` object.
 

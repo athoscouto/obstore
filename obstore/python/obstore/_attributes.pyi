@@ -43,7 +43,10 @@ Attribute: TypeAlias = (
     documentation. `Storage-Class` is used as the name for this attribute because two of
     the three storage providers use that name
 
-Any other string key specifies a user-defined metadata field for the object.
+Any other string key specifies a user-defined metadata field for the object. To
+store a custom field whose name is also a system attribute, pass it through the
+`metadata` argument to `put` instead. `GetResult.metadata` and
+`GetResult.properties` expose the two namespaces separately.
 
 !!! warning "Not importable at runtime"
 

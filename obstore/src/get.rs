@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use futures::stream::{BoxStream, Fuse};
 use futures::StreamExt;
 use object_store::{
-    coalesce_ranges, Attributes, GetOptions, GetRange, GetResult, ObjectMeta, ObjectStore,
-    ObjectStoreExt, OBJECT_STORE_COALESCE_DEFAULT,
+    coalesce_ranges, Attribute, Attributes, GetOptions, GetRange, GetResult, ObjectMeta,
+    ObjectStore, ObjectStoreExt, OBJECT_STORE_COALESCE_DEFAULT,
 };
 use pyo3::exceptions::{PyStopAsyncIteration, PyStopIteration, PyValueError};
 use pyo3::prelude::*;
@@ -194,6 +194,28 @@ impl PyGetResult {
     #[getter]
     fn attributes(&self) -> PyResult<PyAttributes> {
         Ok(PyAttributes::new(self.attributes.clone()))
+    }
+
+    #[getter]
+    fn metadata(&self) -> HashMap<String, String> {
+        self.attributes
+            .iter()
+            .filter_map(|(attribute, value)| match attribute {
+                Attribute::Metadata(name) => Some((name.to_string(), value.to_string())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[getter]
+    fn properties(&self) -> PyAttributes {
+        PyAttributes::new(
+            self.attributes
+                .iter()
+                .filter(|(attribute, _)| !matches!(attribute, Attribute::Metadata(_)))
+                .map(|(attribute, value)| (attribute.clone(), value.clone()))
+                .collect(),
+        )
     }
 
     #[getter]
