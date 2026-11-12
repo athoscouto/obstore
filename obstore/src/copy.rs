@@ -1,11 +1,18 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use object_store::{aws::S3CopyMetadata, path::Path, CopyOptions, PutResult};
+use object_store::{
+    aws::{AmazonS3, S3CopyMetadata},
+    path::Path,
+    CopyOptions, PutResult,
+};
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use pyo3_async_runtimes::tokio::get_runtime;
-use pyo3_object_store::{PyObjectStore, PyObjectStoreResult, PyPath, PyS3Store};
+use pyo3_object_store::{
+    MaybePrefixedStore, PyObjectStore, PyObjectStoreResult, PyPath, PyS3Store,
+};
 
 use crate::put::PyPutResult;
 
@@ -18,8 +25,8 @@ enum PreparedCopy {
         options: CopyOptions,
     },
     S3 {
-        source: PyS3Store,
-        destination: PyS3Store,
+        source: Arc<MaybePrefixedStore<AmazonS3>>,
+        destination: Arc<MaybePrefixedStore<AmazonS3>>,
         from: Path,
         to: Path,
         version: Option<String>,
@@ -62,8 +69,8 @@ impl PreparedCopy {
                 .validate_copy_source(source.as_ref().inner())
                 .map_err(pyo3_object_store::PyObjectStoreError::from)?;
             Ok(Self::S3 {
-                source,
-                destination,
+                source: source.into_inner(),
+                destination: destination.into_inner(),
                 from: from.into(),
                 to: to.into(),
                 version: source_version_id,
@@ -101,8 +108,6 @@ impl PreparedCopy {
                 metadata,
                 return_result,
             } => {
-                let source = source.into_inner();
-                let destination = destination.into_inner();
                 let from = source.full_path(&from);
                 let to = destination.full_path(&to);
                 let result = destination
