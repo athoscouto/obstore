@@ -11,6 +11,7 @@ use pyo3::{intern, IntoPyObjectExt};
 use url::Url;
 
 use crate::aws::credentials::PyAWSCredentialProvider;
+use crate::aws::PyS3RequestMetrics;
 use crate::client::PyClientOptions;
 use crate::config::PyConfigValue;
 use crate::error::{GenericError, ParseUrlError, PyObjectStoreError, PyObjectStoreResult};
@@ -23,6 +24,7 @@ use crate::PyUrl;
 struct S3Config {
     prefix: Option<PyPath>,
     literal_prefix: bool,
+    request_metrics: Option<PyS3RequestMetrics>,
     config: PyAmazonS3Config,
     client_options: Option<PyClientOptions>,
     retry_config: Option<PyRetryConfig>,
@@ -46,6 +48,7 @@ impl S3Config {
             kwargs.set_item(intern!(py, "prefix"), prefix.as_ref().as_ref())?;
         }
         kwargs.set_item(intern!(py, "literal_prefix"), self.literal_prefix)?;
+        kwargs.set_item(intern!(py, "request_metrics"), self.request_metrics.clone())?;
         kwargs.set_item(intern!(py, "config"), &self.config)?;
         if let Some(client_options) = &self.client_options {
             kwargs.set_item(intern!(py, "client_options"), client_options)?;
@@ -92,12 +95,13 @@ impl PyS3Store {
 impl PyS3Store {
     // Create from parameters
     #[new]
-    #[pyo3(signature = (bucket=None, *, prefix=None, literal_prefix=false, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
+    #[pyo3(signature = (bucket=None, *, prefix=None, literal_prefix=false, request_metrics=None, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         bucket: Option<String>,
         prefix: Option<PyPath>,
         literal_prefix: bool,
+        request_metrics: Option<PyS3RequestMetrics>,
         config: Option<PyAmazonS3Config>,
         client_options: Option<PyClientOptions>,
         retry_config: Option<PyRetryConfig>,
@@ -134,12 +138,16 @@ impl PyS3Store {
         }
 
         builder = combined_config.clone().apply_config(builder);
+        if let Some(metrics) = &request_metrics {
+            builder = builder.with_request_metrics(Arc::clone(&metrics.inner));
+        }
 
         Ok(Self {
             store: Arc::new(MaybePrefixedStore::new(builder.build()?, prefix.clone())),
             config: S3Config {
                 prefix,
                 literal_prefix,
+                request_metrics,
                 config: combined_config,
                 client_options,
                 retry_config,
@@ -149,12 +157,13 @@ impl PyS3Store {
     }
 
     #[classmethod]
-    #[pyo3(signature = (url, *, literal_prefix=false, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
+    #[pyo3(signature = (url, *, literal_prefix=false, request_metrics=None, config=None, client_options=None, retry_config=None, credential_provider=None, **kwargs))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_url<'py>(
         cls: &Bound<'py, PyType>,
         url: PyUrl,
         literal_prefix: bool,
+        request_metrics: Option<PyS3RequestMetrics>,
         config: Option<PyAmazonS3Config>,
         client_options: Option<PyClientOptions>,
         retry_config: Option<PyRetryConfig>,
@@ -177,6 +186,7 @@ impl PyS3Store {
         let kwargs = kwargs.unwrap_or_default().into_pyobject(cls.py())?;
         kwargs.set_item("prefix", prefix)?;
         kwargs.set_item("literal_prefix", literal_prefix)?;
+        kwargs.set_item("request_metrics", request_metrics)?;
         kwargs.set_item("config", config)?;
         kwargs.set_item("client_options", client_options)?;
         kwargs.set_item("retry_config", retry_config)?;

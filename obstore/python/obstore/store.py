@@ -84,9 +84,13 @@ __all__ = [
     "S3Config",
     "S3Credential",
     "S3CredentialProvider",
+    "S3RequestMetrics",
     "S3Store",
     "from_url",
 ]
+
+
+S3RequestMetrics = _store.S3RequestMetrics
 
 
 class ObjectStoreMethods:
@@ -794,6 +798,7 @@ def from_url(
     retry_config: RetryConfig | None = None,
     credential_provider: S3CredentialProvider | None = None,
     literal_prefix: bool = False,
+    request_metrics: S3RequestMetrics | None = None,
     **kwargs: Unpack[S3Config],
 ) -> ObjectStore: ...
 @overload
@@ -826,7 +831,7 @@ def from_url(
     automatic_cleanup: bool = False,
     mkdir: bool = False,
 ) -> ObjectStore: ...
-def from_url(  # noqa: C901, PLR0913
+def from_url(  # noqa: C901, PLR0912, PLR0913
     url: str,
     *,
     config: S3Config | GCSConfig | AzureConfig | None = None,
@@ -837,6 +842,7 @@ def from_url(  # noqa: C901, PLR0913
     | AzureCredentialProvider
     | None = None,
     literal_prefix: bool = False,
+    request_metrics: S3RequestMetrics | None = None,
     **kwargs: Any,
 ) -> ObjectStore:
     """Easy construction of store by URL, identifying the relevant store.
@@ -884,6 +890,7 @@ def from_url(  # noqa: C901, PLR0913
             store classes.
         literal_prefix: Use literal string prefixes for recursive S3 list operations.
             Defaults to `False`.
+        request_metrics: Optional shared S3 transport-attempt counter handle.
         kwargs: per-store configuration passed down to store-specific builders.
 
     """
@@ -892,12 +899,15 @@ def from_url(  # noqa: C901, PLR0913
         return S3Store.from_url(
             url,
             literal_prefix=literal_prefix,
+            request_metrics=request_metrics,
             config=config,  # type: ignore[arg-type]
             client_options=client_options,
             retry_config=retry_config,
             credential_provider=credential_provider,  # type: ignore[arg-type]
             **kwargs,
         )
+    if request_metrics is not None:
+        raise ValueError("request_metrics is only supported for S3 stores")
     if literal_prefix:
         raise ValueError("literal_prefix is only supported for S3 stores")
     if scheme == "gcs":
